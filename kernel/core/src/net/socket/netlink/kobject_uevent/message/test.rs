@@ -51,6 +51,7 @@ fn synthetic_uevent() {
 
 #[ktest]
 fn multicast_synthetic_uevent() {
+    crate::time::clocks::init_for_ktest();
     crate::net::socket::netlink::init();
 
     // Creates a new netlink uevent socket and joins the group for kobject uevents.
