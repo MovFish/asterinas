@@ -39,6 +39,8 @@ pub enum Error {
     Format,
     /// The value written to an attribute is invalid.
     InvalidValue,
+    /// The requested data exceeds a fixed memory budget.
+    NoMemory,
     /// A resource (such as attribute IDs) is exhausted.
     ResourceUnavailable,
     /// The kernel hook failed to create or delete a device node.
@@ -66,6 +68,7 @@ impl fmt::Display for Error {
             Error::Format => write!(f, "formatting an attribute value failed"),
             Error::Attribute => write!(f, "attribute operation failed"),
             Error::InvalidValue => write!(f, "invalid attribute value"),
+            Error::NoMemory => write!(f, "memory budget exceeded"),
             Error::ResourceUnavailable => write!(f, "resource unavailable"),
             Error::Hook => write!(f, "kernel hook failed"),
             Error::SysTree(e) => write!(f, "systree error: {}", e),
@@ -78,6 +81,7 @@ impl From<aster_systree::Error> for Error {
         match e {
             aster_systree::Error::AlreadyExists => Error::NameConflict,
             aster_systree::Error::NotFound => Error::NotFound,
+            aster_systree::Error::NoMemory => Error::NoMemory,
             aster_systree::Error::ResourceUnavailable => Error::ResourceUnavailable,
             other => Error::SysTree(other),
         }
@@ -96,6 +100,7 @@ impl From<Error> for aster_systree::Error {
             Error::NotFound => aster_systree::Error::NotFound,
             Error::NameConflict => aster_systree::Error::AlreadyExists,
             Error::InvalidValue | Error::InvalidName => aster_systree::Error::InvalidOperation,
+            Error::NoMemory => aster_systree::Error::NoMemory,
             Error::ResourceUnavailable => aster_systree::Error::ResourceUnavailable,
             Error::NotAdded => aster_systree::Error::IsDead,
             Error::SysTree(inner) => inner,

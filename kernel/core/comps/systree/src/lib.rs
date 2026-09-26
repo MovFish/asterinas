@@ -104,6 +104,8 @@ pub enum Error {
     PageFault,
     /// The current systree item is dead
     IsDead,
+    /// Insufficient memory or buffer space
+    NoMemory,
 }
 
 impl core::fmt::Display for Error {
@@ -120,6 +122,7 @@ impl core::fmt::Display for Error {
             Error::Overflow => write!(f, "numerical overflow occurred"),
             Error::PageFault => write!(f, "page fault occurred during memory access"),
             Error::IsDead => write!(f, "the current systree item is dead"),
+            Error::NoMemory => write!(f, "out of memory"),
         }
     }
 }

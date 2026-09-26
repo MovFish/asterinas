@@ -362,6 +362,7 @@ impl From<aster_device::Error> for Error {
             NameConflict => Error::new(Errno::EEXIST),
             NotFound | NoDriver => Error::new(Errno::ENOENT),
             InvalidName | InvalidValue => Error::new(Errno::EINVAL),
+            NoMemory => Error::new(Errno::ENOMEM),
             ProbeFailed | Attribute | Format | Hook => Error::new(Errno::EIO),
             ResourceUnavailable => Error::new(Errno::ENOSPC),
             SysTree(inner) => inner.into(),
@@ -383,6 +384,7 @@ impl From<aster_systree::Error> for Error {
             Overflow => Error::new(Errno::EOVERFLOW),
             PageFault => Error::new(Errno::EFAULT),
             IsDead => Error::new(Errno::ENODEV),
+            NoMemory => Error::new(Errno::ENOMEM),
         }
     }
 }

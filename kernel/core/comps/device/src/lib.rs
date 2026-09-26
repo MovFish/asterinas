@@ -53,6 +53,7 @@ mod node;
 mod subsystem;
 #[cfg(ktest)]
 mod test;
+pub mod uevent;
 
 use alloc::{sync::Arc, vec::Vec};
 
