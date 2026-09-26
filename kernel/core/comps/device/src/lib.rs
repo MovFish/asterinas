@@ -68,7 +68,7 @@ pub use self::{
     class::{Class, ClassHandle, ClassInterface, register_class},
     device::{
         AnyDevice, BareDevice, BusDevice, BusDeviceBuilder, ClassDevice, ClassDeviceBuilder,
-        DevNode, DeviceBase, DeviceBuilder, DeviceType, add, remove,
+        DevNode, DeviceBase, DeviceBuilder, DeviceType, add, emit_uevent, remove,
     },
     devnum::{DEFAULT_DEVNODE_MODE, DevKind, DevNodeRequest, DevNum},
     driver::{Driver, DriverHandle},

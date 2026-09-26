@@ -55,6 +55,18 @@ pub trait Bus: Sized + Send + Sync + 'static {
     fn dev_attrs(&self) -> &'static [Attr<BusDevice<Self>>] {
         &[]
     }
+
+    /// Contributes bus-specific environment variables to a device uevent.
+    ///
+    /// # Concurrency
+    ///
+    /// Called outside the state lock and event lock during uevent generation.
+    /// May be called while holding `bind_lock` during automatic binding.
+    /// Implementations must not synchronously re-enter `bind`, `unbind`, or `remove`
+    /// on the same device.
+    fn uevent(&self, _dev: &Self::Device, _vars: &mut crate::uevent::UeventVars) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Registers a bus, creating `/sys/bus/<name>/{devices,drivers}`.
@@ -244,11 +256,19 @@ impl<B: Bus> BusHandle<B> {
         driver.state().lock().start_binding(dev)?;
 
         let result = self.bind_inner(dev, driver);
-        let mut state = driver.state().lock();
+        {
+            let mut state = driver.state().lock();
+            if result.is_ok() {
+                state.finish_binding(dev);
+            } else {
+                state.abort_binding(dev);
+            }
+        }
         if result.is_ok() {
-            state.finish_binding(dev);
-        } else {
-            state.abort_binding(dev);
+            let _ = crate::device::emit_internal_uevent(
+                dev.as_ref(),
+                crate::uevent::UeventAction::Bind,
+            );
         }
         result
     }
@@ -302,6 +322,8 @@ impl<B: Bus> BusHandle<B> {
         driver.remove(dev);
         dev.take_driver();
         driver.state().lock().forget_bound(dev);
+        let _ =
+            crate::device::emit_internal_uevent(dev.as_ref(), crate::uevent::UeventAction::Unbind);
         Ok(())
     }
 }

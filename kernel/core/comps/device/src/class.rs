@@ -41,6 +41,21 @@ pub trait Class: Sized + Send + Sync + 'static {
         &[]
     }
 
+    /// Contributes class-specific environment variables to a device uevent.
+    ///
+    /// # Concurrency
+    ///
+    /// Called outside the state lock and event lock during uevent generation.
+    /// Implementations must not synchronously re-enter `bind`, `unbind`, or `remove`
+    /// on the same device.
+    fn uevent(
+        &self,
+        _dev: &ClassDevice<Self>,
+        _vars: &mut crate::uevent::UeventVars,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Whether a device of this class placed under a class device still gets its own glue directory.
     /// Linux does this for classes that define a sysfs namespace type, such as `net`,
     /// whose glue directory is what scopes the names to a namespace.

@@ -25,6 +25,8 @@ mod bare_device;
 mod bus_device;
 mod class_device;
 mod registration;
+#[cfg(ktest)]
+mod test;
 
 use alloc::{
     collections::BTreeMap,
@@ -41,12 +43,12 @@ pub use self::{
     bare_device::BareDevice,
     bus_device::{BusDevice, BusDeviceBuilder},
     class_device::{ClassDevice, ClassDeviceBuilder},
-    registration::{DeviceBuilder, add, remove},
+    registration::{DeviceBuilder, add, emit_uevent, remove},
 };
 use crate::{
     Error, Result, Subsystem, SubsystemKind, SysStr,
     attr::{Attr, AttrTable, TyErasedAttr},
-    devnum::{DevNodeRequest, DevNum},
+    devnum::{DevNodeSpec, DevNum},
     node::{Dir, GlueDirs, SysTreeEdit},
 };
 
@@ -113,7 +115,9 @@ pub struct DeviceBase {
     /// so that `teardown` removes only links this device made.
     links: Mutex<Links>,
     /// The `/dev` node created for this device, kept so it can be deleted.
-    devnode: Mutex<Option<DevNodeRequest>>,
+    devnode: Mutex<Option<DevNodeSpec>>,
+    /// A lock serializing final state check, sequence number allocation, and hook broadcast.
+    uevent_lock: Mutex<()>,
 }
 
 impl DeviceBase {
@@ -171,6 +175,7 @@ impl DeviceBase {
             glue_dirs: GlueDirs::new(),
             links: Mutex::new(Links::default()),
             devnode: Mutex::new(None),
+            uevent_lock: Mutex::new(()),
         }
     }
 }
@@ -195,6 +200,8 @@ pub struct DeviceType<D: 'static> {
     pub attrs: &'static [Attr<D>],
     /// Overrides the `/dev` node name or mode.
     pub devnode: Option<fn(&D) -> Option<DevNode>>,
+    /// Contributes device-type-specific environment variables to a uevent.
+    pub uevent_fn: Option<fn(&D, &mut crate::uevent::UeventVars) -> Result<()>>,
     /// Whether a class device of this type gets the `device` symlink to its parent.
     /// Linux omits the link for one type only: block partitions.
     pub has_device_link: bool,
@@ -207,6 +214,7 @@ impl<D: 'static> DeviceType<D> {
             name,
             attrs: &[],
             devnode: None,
+            uevent_fn: None,
             has_device_link: true,
         }
     }
@@ -311,7 +319,7 @@ mod internals {
     use alloc::vec::Vec;
 
     use super::DevNode;
-    use crate::attr::TyErasedAttr;
+    use crate::{Result, attr::TyErasedAttr};
 
     /// What the registration sequence asks a device for.
     ///
@@ -332,6 +340,9 @@ mod internals {
         fn wants_device_link(&self) -> bool {
             true
         }
+
+        /// Contributes subsystem and type variables to uevent environment.
+        fn typed_uevent(&self, vars: &mut crate::uevent::UeventVars) -> Result<()>;
     }
 }
 
@@ -490,6 +501,72 @@ macro_rules! impl_device_node {
 
         impl$(<$p: $bound>)? $crate::Container for $ty$(<$p>)? {}
     };
+}
+
+pub(crate) use self::registration::emit_internal_uevent;
+
+fn build_uevent_vars(
+    dev: &dyn AnyDevice,
+    action: Option<crate::uevent::UeventAction>,
+) -> Result<crate::uevent::UeventVars> {
+    let mut vars = crate::uevent::UeventVars::new();
+
+    // 1. Universal DevNode fields
+    if let Some(devnum) = dev.base().devnum()
+        && devnum.id().major().get() != 0
+    {
+        vars.add("MAJOR", devnum.id().major().get())?;
+        vars.add("MINOR", devnum.id().minor().get())?;
+
+        let devnode_guard = dev.base().devnode.lock();
+        let (devname, has_nonzero_mode_override, mode) = if let Some(spec) = devnode_guard.as_ref()
+        {
+            (
+                spec.request.path.clone(),
+                spec.has_nonzero_mode_override,
+                spec.request.mode,
+            )
+        } else {
+            let spec = registration::devnode_spec(dev, devnum);
+            (
+                spec.request.path,
+                spec.has_nonzero_mode_override,
+                spec.request.mode,
+            )
+        };
+        drop(devnode_guard);
+
+        vars.add("DEVNAME", devname)?;
+
+        if has_nonzero_mode_override {
+            let masked = mode & 0o777;
+            if masked == 0 {
+                vars.add("DEVMODE", "0")?;
+            } else {
+                vars.add("DEVMODE", alloc::format!("0{:o}", masked))?;
+            }
+        }
+    }
+
+    // 2. DEVTYPE
+    if let Some(devtype) = dev.type_name() {
+        vars.add("DEVTYPE", devtype)?;
+    }
+
+    // 3. DRIVER
+    if let Some(driver) = dev.driver_name() {
+        vars.add("DRIVER", driver)?;
+    }
+
+    // 4. Subsystem & type callbacks
+    dev.typed_uevent(&mut vars)?;
+
+    // 5. Unbind removes all MODALIAS
+    if action == Some(crate::uevent::UeventAction::Unbind) {
+        vars.remove_all("MODALIAS");
+    }
+
+    Ok(vars)
 }
 
 use impl_device_node;

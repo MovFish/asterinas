@@ -13,7 +13,7 @@ use super::{
     AnyDevice, DeclaredParts, DevNode, DeviceBase, DeviceBuilder, DeviceInternals, impl_device_node,
 };
 use crate::{
-    Subsystem, SysStr,
+    Result, Subsystem, SysStr,
     attr::TyErasedAttr,
     class::{Class, ClassHandle},
 };
@@ -144,6 +144,18 @@ impl<C: Class> DeviceInternals for ClassDevice<C> {
 
     fn wants_device_link(&self) -> bool {
         self.declared.has_device_link()
+    }
+
+    fn typed_uevent(&self, vars: &mut crate::uevent::UeventVars) -> Result<()> {
+        self.class.class().uevent(self, vars)?;
+        if let Some(uevent_fn) = self
+            .declared
+            .dev_type
+            .and_then(|dev_type| dev_type.uevent_fn)
+        {
+            uevent_fn(self, vars)?;
+        }
+        Ok(())
     }
 }
 

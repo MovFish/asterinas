@@ -43,12 +43,19 @@ pub type ShowFn<D> = fn(&D, &mut dyn Write) -> Result<()>;
 /// A function that consumes the text written to an attribute.
 pub type StoreFn<D> = fn(&D, &str) -> Result<()>;
 
+#[derive(Clone, Copy, Debug)]
+enum StoreInput {
+    Text,
+    Raw,
+}
+
 /// A statically declared attribute of devices of type `D`.
 pub struct Attr<D: ?Sized> {
     name: &'static str,
     perms: SysPerms,
     show: Option<ShowFn<D>>,
     store: Option<StoreFn<D>>,
+    store_input: StoreInput,
 }
 
 impl<D: ?Sized> Attr<D> {
@@ -59,6 +66,7 @@ impl<D: ?Sized> Attr<D> {
             perms: SysPerms::DEFAULT_RO_ATTR_PERMS,
             show: Some(show),
             store: None,
+            store_input: StoreInput::Text,
         }
     }
 
@@ -69,6 +77,7 @@ impl<D: ?Sized> Attr<D> {
             perms: SysPerms::DEFAULT_RW_ATTR_PERMS,
             show: Some(show),
             store: Some(store),
+            store_input: StoreInput::Text,
         }
     }
 
@@ -79,6 +88,18 @@ impl<D: ?Sized> Attr<D> {
             perms: SysPerms::OWNER_W,
             show: None,
             store: Some(store),
+            store_input: StoreInput::Text,
+        }
+    }
+
+    /// Creates a read-write attribute whose store callback receives the exact written text.
+    pub(crate) const fn rw_raw(name: &'static str, show: ShowFn<D>, store: StoreFn<D>) -> Self {
+        Self {
+            name,
+            perms: SysPerms::DEFAULT_RW_ATTR_PERMS,
+            show: Some(show),
+            store: Some(store),
+            store_input: StoreInput::Raw,
         }
     }
 
@@ -120,6 +141,7 @@ pub struct TyErasedAttr {
     perms: SysPerms,
     show: Option<TyErasedShowFn>,
     store: Option<TyErasedStoreFn>,
+    store_input: StoreInput,
 }
 
 impl fmt::Debug for TyErasedAttr {
@@ -151,6 +173,7 @@ impl TyErasedAttr {
             perms: attr.perms,
             show,
             store,
+            store_input: attr.store_input,
         }
     }
 
@@ -190,6 +213,7 @@ impl TyErasedAttr {
                 perms: attr.perms,
                 show,
                 store,
+                store_input: attr.store_input,
             });
         }
         attrs
@@ -204,6 +228,7 @@ impl TyErasedAttr {
             store: attr
                 .store
                 .map(|store| -> TyErasedStoreFn { Arc::new(store) }),
+            store_input: attr.store_input,
         }
     }
 
@@ -329,21 +354,27 @@ impl AttrTable {
     }
 
     /// Serves a write of an attribute.
-    /// The written bytes are taken as text with any trailing newline removed.
+    ///
+    /// Text input has trailing linefeeds removed; raw input is passed to its callback unchanged.
     pub(crate) fn store(
         &self,
         dev: &dyn AnyDevice,
         name: &str,
         reader: &mut VmReader,
     ) -> aster_systree::Result<usize> {
-        let store = {
+        let (store, store_input) = {
             let inner = self.inner.read();
             let attr = inner.ops.get(name).ok_or(aster_systree::Error::NotFound)?;
-            attr.store
+            let store = attr
+                .store
                 .clone()
-                .ok_or(aster_systree::Error::PermissionDenied)?
+                .ok_or(aster_systree::Error::PermissionDenied)?;
+            (store, attr.store_input)
         };
-        let (text, len) = read_text(reader)?;
+        let (text, len) = match store_input {
+            StoreInput::Text => read_text(reader)?,
+            StoreInput::Raw => read_raw_text(reader)?,
+        };
         store(dev, &text)?;
         Ok(len)
     }
@@ -351,13 +382,19 @@ impl AttrTable {
 
 /// Reads at most `MAX_ATTR_SIZE` bytes from user space as text.
 pub(crate) fn read_text(reader: &mut VmReader) -> aster_systree::Result<(String, usize)> {
+    let (mut text, len) = read_raw_text(reader)?;
+    text.truncate(text.trim_end_matches('\n').len());
+    Ok((text, len))
+}
+
+/// Reads at most `MAX_ATTR_SIZE` bytes from user space as raw text, without stripping linefeeds.
+fn read_raw_text(reader: &mut VmReader) -> aster_systree::Result<(String, usize)> {
     let mut buf = vec![0u8; MAX_ATTR_SIZE];
     let mut writer = VmWriter::from(buf.as_mut_slice());
     let len = reader
         .read_fallible(&mut writer)
         .map_err(|_| aster_systree::Error::PageFault)?;
-    let text = core::str::from_utf8(&buf[..len])
-        .map_err(|_| aster_systree::Error::InvalidOperation)?
-        .trim_end_matches('\n');
-    Ok((String::from(text), len))
+    buf.truncate(len);
+    let text = String::from_utf8(buf).map_err(|_| aster_systree::Error::InvalidOperation)?;
+    Ok((text, len))
 }

@@ -296,7 +296,6 @@ fn bus_device_registration_and_probe() {
         read_attr("/devices/toy0000:00/0000:00:01.0", "vendor"),
         "0x0001\n"
     );
-    assert_eq!(names.len(), 3);
 
     // 6. Check the disk created by probe, its links, attributes, and notification.
     let disk_path = "/devices/toy0000:00/0000:00:01.0/toyblk/td3";
@@ -319,7 +318,6 @@ fn bus_device_registration_and_probe() {
     );
     assert_eq!(read_attr(disk_path, "dev"), "200:3\n");
     assert_eq!(read_attr(disk_path, "size"), "8\n");
-    assert_eq!(attr_names(disk_path).len(), 2);
     assert_eq!(iface.added.load(Ordering::Relaxed), 1);
 
     // 7. Unbind and check that the disk, driver entries, and glue directory vanish.

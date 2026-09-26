@@ -164,6 +164,18 @@ impl<B: Bus> DeviceInternals for BusDevice<B> {
     fn devnode_override(&self) -> Option<DevNode> {
         self.declared.type_devnode(self)
     }
+
+    fn typed_uevent(&self, vars: &mut crate::uevent::UeventVars) -> Result<()> {
+        self.bus.bus().uevent(&self.payload, vars)?;
+        if let Some(uevent_fn) = self
+            .declared
+            .dev_type
+            .and_then(|dev_type| dev_type.uevent_fn)
+        {
+            uevent_fn(self, vars)?;
+        }
+        Ok(())
+    }
 }
 
 impl_device_node!(BusDevice<B: Bus>);

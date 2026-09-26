@@ -28,6 +28,20 @@ pub trait KernelHooks: Send + Sync + 'static {
     /// Deletes a `/dev` node created earlier.
     /// The request is the one that created the node.
     fn delete_devnode(&self, request: &DevNodeRequest) -> core::result::Result<(), HookError>;
+
+    /// Broadcasts a device uevent to user space.
+    ///
+    /// The default implementation is a no-op so that the device model operates
+    /// before the kernel-level event broadcaster is connected.
+    ///
+    /// Concurrency: invoked while holding `uevent_lock`.
+    /// This hook MUST NOT call back into the device model or wait on device lifecycle operations.
+    fn broadcast_uevent(
+        &self,
+        _event: &crate::uevent::Uevent,
+    ) -> core::result::Result<(), HookError> {
+        Ok(())
+    }
 }
 
 /// An error from a kernel hook.
@@ -49,6 +63,10 @@ pub(crate) fn create_devnode(request: DevNodeRequest) -> Result<()> {
 
 pub(crate) fn delete_devnode(request: &DevNodeRequest) -> Result<()> {
     HOOKS.delete_devnode(request)
+}
+
+pub(crate) fn broadcast_uevent(event: &crate::uevent::Uevent) -> Result<()> {
+    HOOKS.broadcast_uevent(event)
 }
 
 /// The slot the kernel crate installs into.
@@ -89,6 +107,12 @@ impl HookSlot {
     }
 
     pub(crate) fn create_devnode(&self, request: DevNodeRequest) -> Result<()> {
+        #[cfg(ktest)]
+        {
+            if test_support::FAIL_DEVNODE_CREATE.load(core::sync::atomic::Ordering::Relaxed) {
+                return Err(Error::Hook);
+            }
+        }
         let mut queue = self.pending.lock();
         match self.hooks.get() {
             Some(hooks) => {
@@ -115,5 +139,40 @@ impl HookSlot {
                 Ok(())
             }
         }
+    }
+
+    pub(crate) fn broadcast_uevent(&self, event: &crate::uevent::Uevent) -> Result<()> {
+        #[cfg(ktest)]
+        {
+            let observers = test_support::EVENT_OBSERVERS.lock().clone();
+            for obs in observers {
+                obs(event);
+            }
+        }
+        if let Some(hooks) = self.hooks.get() {
+            hooks.broadcast_uevent(event).map_err(|_| Error::Hook)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(ktest)]
+pub(crate) mod test_support {
+    use core::sync::atomic::AtomicBool;
+
+    use super::*;
+
+    pub(crate) type EventObserver = Arc<dyn Fn(&crate::uevent::Uevent) + Send + Sync>;
+
+    pub(crate) static FAIL_DEVNODE_CREATE: AtomicBool = AtomicBool::new(false);
+    pub(crate) static EVENT_OBSERVERS: spin::Mutex<Vec<EventObserver>> =
+        spin::Mutex::new(Vec::new());
+
+    pub(crate) fn register_test_observer(observer_fn: EventObserver) {
+        EVENT_OBSERVERS.lock().push(observer_fn);
+    }
+
+    pub(crate) fn clear_test_observers() {
+        EVENT_OBSERVERS.lock().clear();
     }
 }

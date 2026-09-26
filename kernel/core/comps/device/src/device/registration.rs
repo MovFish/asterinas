@@ -4,7 +4,7 @@
 //! and the builder that every typed device is created through.
 
 use alloc::{
-    string::ToString,
+    string::{String, ToString},
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -16,7 +16,7 @@ use super::{AnyDevice, DeclaredParts, DeviceType, State, TreeParent};
 use crate::{
     Error, Result, Subsystem, SubsystemKind, SysStr,
     attr::{Attr, TyErasedAttr},
-    devnum::{DEFAULT_DEVNODE_MODE, DevNodeRequest, DevNum},
+    devnum::{DEFAULT_DEVNODE_MODE, DevNodeRequest, DevNodeSpec, DevNum},
     hooks,
     node::{SysTreeEdit, add_link, remove_link},
     registry,
@@ -49,6 +49,7 @@ pub fn remove<D: AnyDevice + ?Sized>(dev: &Arc<D>) -> Result<()> {
     let this = dev.to_arc();
     let base = this.base();
     {
+        let _uevent_guard = base.uevent_lock.lock();
         let mut state = base.state.lock();
         let State::Added(children) = &*state else {
             return Err(Error::NotAdded);
@@ -58,7 +59,91 @@ pub fn remove<D: AnyDevice + ?Sized>(dev: &Arc<D>) -> Result<()> {
         }
         *state = State::Removed;
     }
+
+    if let Some(ops) = this.subsystem().ops() {
+        ops.on_removed(&this);
+    }
+
+    let _ = emit_internal_uevent(this.as_ref(), crate::uevent::UeventAction::Remove);
+
     teardown(&this);
+    Ok(())
+}
+
+/// Emits a uevent for a device to user space.
+///
+/// # Concurrency and Errors
+///
+/// Checks that the device is registered (`State::Adding` or `State::Added`).
+/// Callbacks are run outside the uevent and state locks.
+/// If the device is removed concurrently, this returns [`Error::NotAdded`]
+/// without allocating a sequence number or broadcasting.
+pub fn emit_uevent<D: AnyDevice + ?Sized>(
+    dev: &Arc<D>,
+    action: crate::uevent::UeventAction,
+) -> Result<()> {
+    let this = dev.to_arc();
+    let base = this.base();
+    if !base.is_added() {
+        return Err(Error::NotAdded);
+    }
+
+    let Some((devpath, subsystem_name, vars)) = prepare_uevent(this.as_ref(), action)? else {
+        return Ok(());
+    };
+
+    broadcast_registered_uevent(this.as_ref(), action, devpath, subsystem_name, vars)
+}
+
+pub(crate) fn emit_internal_uevent(
+    this: &dyn AnyDevice,
+    action: crate::uevent::UeventAction,
+) -> Result<()> {
+    let Some((devpath, subsystem_name, vars)) = prepare_uevent(this, action)? else {
+        return Ok(());
+    };
+
+    let _uevent_guard = this.base().uevent_lock.lock();
+    broadcast_prepared_uevent(action, devpath, subsystem_name, vars)
+}
+
+fn prepare_uevent(
+    dev: &dyn AnyDevice,
+    action: crate::uevent::UeventAction,
+) -> Result<Option<(String, String, crate::uevent::UeventVars)>> {
+    let devpath = dev.base().tree_path();
+    let Some(subsystem_name) = dev.subsystem().name().map(str::to_string) else {
+        return Ok(None);
+    };
+    let vars = super::build_uevent_vars(dev, Some(action))?;
+    Ok(Some((devpath, subsystem_name, vars)))
+}
+
+fn broadcast_registered_uevent(
+    dev: &dyn AnyDevice,
+    action: crate::uevent::UeventAction,
+    devpath: String,
+    subsystem: String,
+    vars: crate::uevent::UeventVars,
+) -> Result<()> {
+    let _uevent_guard = dev.base().uevent_lock.lock();
+    let state = dev.base().state.lock();
+    if !matches!(*state, State::Adding(_) | State::Added(_)) {
+        return Err(Error::NotAdded);
+    }
+    drop(state);
+
+    broadcast_prepared_uevent(action, devpath, subsystem, vars)
+}
+
+fn broadcast_prepared_uevent(
+    action: crate::uevent::UeventAction,
+    devpath: String,
+    subsystem: String,
+    vars: crate::uevent::UeventVars,
+) -> Result<()> {
+    let event = crate::uevent::Uevent::new(action, devpath, subsystem, vars)?;
+    let _ = hooks::broadcast_uevent(&event);
     Ok(())
 }
 
@@ -161,6 +246,7 @@ fn add_steps(this: &Arc<dyn AnyDevice>) -> Result<()> {
 
     // 2. Core attributes.
     let mut attrs = Vec::new();
+    attrs.push(TyErasedAttr::from_dyn(&UEVENT_ATTR));
     if base.devnum().is_some() {
         attrs.push(TyErasedAttr::from_dyn(&DEV_ATTR));
     }
@@ -191,14 +277,14 @@ fn add_steps(this: &Arc<dyn AnyDevice>) -> Result<()> {
         let index = registry().dev_index(devnum.kind());
         add_link(index.as_ref(), &devnum.to_string(), &path)?;
         base.links.lock().dev_index = true;
-        let request = devnode_request(this.as_ref(), devnum);
-        hooks::create_devnode(request.clone())?;
-        *base.devnode.lock() = Some(request);
+        let spec = devnode_spec(this.as_ref(), devnum);
+        hooks::create_devnode(spec.request.clone())?;
+        *base.devnode.lock() = Some(spec);
     }
 
-    // No fallible registration steps remain. The path is now stable, and
-    // callbacks can register children without a later rollback orphaning them.
+    // No fallible registration steps remain. The path is now stable.
     *base.state.lock() = State::Adding(Vec::new());
+    let _ = emit_internal_uevent(this.as_ref(), crate::uevent::UeventAction::Add);
 
     // 6. Let the subsystem act.
     if let Some(ops) = subsystem.ops() {
@@ -208,27 +294,17 @@ fn add_steps(this: &Arc<dyn AnyDevice>) -> Result<()> {
     Ok(())
 }
 
-/// Undoes registration, tolerating steps that never happened.
+/// Tears down registration resources, tolerating steps that never happened.
 fn teardown(this: &Arc<dyn AnyDevice>) {
+    let links = core::mem::take(&mut *this.base().links.lock());
     let base = this.base();
     let subsystem = this.subsystem();
-    // Only links this device created are removed: an index entry under the
-    // same name may belong to another device whose name this one clashed with.
-    let links = core::mem::take(&mut *base.links.lock());
-
-    // 6. Let the subsystem act.
-    if let Some(ops) = subsystem.ops() {
-        ops.on_removed(this);
-    }
 
     // 5. Device number.
     if let Some(devnum) = base.devnum() {
-        // Taken in its own statement: the guard of an `if let` scrutinee lives
-        // to the end of the block, which would hold this device's `devnode`
-        // mutex across the hook and put the hook queue underneath it.
-        let request = base.devnode.lock().take();
-        if let Some(request) = request {
-            let _ = hooks::delete_devnode(&request);
+        let spec = base.devnode.lock().take();
+        if let Some(spec) = spec {
+            let _ = hooks::delete_devnode(&spec.request);
         }
         if links.dev_index {
             remove_link(
@@ -348,16 +424,44 @@ fn uses_glue_dir(subsystem: &Subsystem, parent: &Arc<dyn AnyDevice>) -> bool {
 /// when neither the type nor the subsystem named a node,
 /// so that a name such as `cciss!c0d0` becomes the node `cciss/c0d0`.
 ///
-/// The result is computed once, in step 5 of [`add`], and kept for deleting the node.
-fn devnode_request(dev: &dyn AnyDevice, devnum: DevNum) -> DevNodeRequest {
+/// Registration stores the result for deleting the node and reporting it in uevents.
+pub(super) fn devnode_spec(dev: &dyn AnyDevice, devnum: DevNum) -> DevNodeSpec {
     let over = dev.devnode_override().unwrap_or_default();
-    DevNodeRequest {
-        devnum,
-        path: over
-            .path
-            .unwrap_or_else(|| SysStr::from(dev.base().name().replace('!', "/"))),
-        mode: over.mode.unwrap_or(DEFAULT_DEVNODE_MODE),
+    let has_nonzero_mode_override = over.mode.is_some_and(|mode| mode != 0);
+    let mode = over.mode.unwrap_or(DEFAULT_DEVNODE_MODE);
+    let path = over
+        .path
+        .unwrap_or_else(|| SysStr::from(dev.base().name().replace('!', "/")));
+    DevNodeSpec {
+        request: DevNodeRequest { devnum, path, mode },
+        has_nonzero_mode_override,
     }
+}
+
+const UEVENT_ATTR: Attr<dyn AnyDevice> = Attr::rw_raw("uevent", show_uevent, store_uevent);
+
+fn show_uevent(dev: &dyn AnyDevice, w: &mut dyn Write) -> Result<()> {
+    let vars = super::build_uevent_vars(dev, None)?;
+    for (k, v) in vars.iter() {
+        writeln!(w, "{}={}", k, v)?;
+    }
+    Ok(())
+}
+
+fn store_uevent(dev: &dyn AnyDevice, text: &str) -> Result<()> {
+    if !dev.base().is_added() {
+        return Err(Error::NotAdded);
+    }
+
+    let (action, synth_vars) = crate::uevent::parse_synthetic(text)?;
+    let Some((devpath, subsystem_name, mut vars)) = prepare_uevent(dev, action)? else {
+        return Ok(());
+    };
+    for (key, value) in synth_vars.iter() {
+        vars.add(key, value)?;
+    }
+
+    broadcast_registered_uevent(dev, action, devpath, subsystem_name, vars)
 }
 
 const DEV_ATTR: Attr<dyn AnyDevice> = Attr::ro("dev", show_dev);

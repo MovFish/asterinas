@@ -79,6 +79,10 @@ impl DeviceInternals for BareDevice {
     fn devnode_override(&self) -> Option<DevNode> {
         None
     }
+
+    fn typed_uevent(&self, _vars: &mut crate::uevent::UeventVars) -> crate::Result<()> {
+        Ok(())
+    }
 }
 
 impl_device_node!(BareDevice);

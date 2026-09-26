@@ -71,3 +71,11 @@ pub struct DevNodeRequest {
 /// The default mode of a device node when neither the device type nor the class overrides it
 /// (Linux devtmpfs uses `0600` as well).
 pub const DEFAULT_DEVNODE_MODE: u16 = 0o600;
+
+/// Internal specification caching the devnode request and whether a callback supplied a nonzero
+/// mode override.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DevNodeSpec {
+    pub(crate) request: DevNodeRequest,
+    pub(crate) has_nonzero_mode_override: bool,
+}
