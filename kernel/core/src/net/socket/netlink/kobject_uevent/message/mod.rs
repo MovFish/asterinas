@@ -1,38 +1,40 @@
 // SPDX-License-Identifier: MPL-2.0
 
-#![cfg_attr(not(ktest), expect(dead_code))]
-
-use uevent::Uevent;
+use aster_device::uevent::Uevent;
 
 use crate::{
     net::socket::netlink::{
-        NetlinkSocketAddr, receiver::QueueableMessage, table::MulticastMessage,
+        GroupIdSet, NetlinkSocketAddr,
+        receiver::QueueableMessage,
+        table::{MulticastMessage, NetlinkUeventProtocol, SupportedNetlinkProtocol},
     },
     prelude::*,
     util::MultiWrite,
 };
 
-mod syn_uevent;
 #[cfg(ktest)]
 mod test;
 mod uevent;
 
-/// A uevent message.
+const KOBJECT_UEVENT_GROUP_MASK: u32 = 1;
+
+/// A uevent message for Netlink multicast distribution.
 ///
-/// Note that uevent messages are not the same as common netlink messages.
-/// It does not have a netlink header.
+/// Netlink uevent messages do not include a standard Netlink message header.
+/// The payload is serialized as consecutive NUL-terminated strings.
 #[derive(Clone, Debug)]
 pub(crate) struct UeventMessage {
-    uevent: String,
+    raw: Arc<Vec<u8>>,
     src_addr: NetlinkSocketAddr,
 }
 
 impl UeventMessage {
-    /// Creates a new uevent message.
-    fn new(uevent: Uevent, src_addr: NetlinkSocketAddr) -> Self {
+    /// Constructs a new `UeventMessage` from an existing `Uevent`.
+    fn from_uevent(event: &Uevent) -> Self {
+        let raw = Arc::new(uevent::serialize_uevent(event));
         Self {
-            uevent: uevent.to_string(),
-            src_addr,
+            raw,
+            src_addr: NetlinkSocketAddr::new(0, GroupIdSet::new(KOBJECT_UEVENT_GROUP_MASK)),
         }
     }
 
@@ -41,19 +43,23 @@ impl UeventMessage {
         &self.src_addr
     }
 
-    /// Writes the uevent to the given `writer`.
+    /// Writes the uevent bytes to the given `writer`.
     pub(super) fn write_to(&self, writer: &mut dyn MultiWrite) -> Result<()> {
-        let _nbytes = writer.write(&mut VmReader::from(self.uevent.as_bytes()))?;
-        // `_nbytes` may be smaller than the message size. We ignore it to truncate the message.
-
+        let _nbytes = writer.write(&mut VmReader::from(self.raw.as_slice()))?;
         Ok(())
     }
 }
 
 impl QueueableMessage for UeventMessage {
     fn total_len(&self) -> usize {
-        self.uevent.len()
+        self.raw.len()
     }
 }
 
 impl MulticastMessage for UeventMessage {}
+
+/// Broadcasts a device uevent to multicast group 1 (mask 1) with sender port 0.
+pub(crate) fn broadcast_uevent(event: &Uevent) {
+    let msg = UeventMessage::from_uevent(event);
+    let _ = NetlinkUeventProtocol::multicast(GroupIdSet::new(KOBJECT_UEVENT_GROUP_MASK), msg);
+}

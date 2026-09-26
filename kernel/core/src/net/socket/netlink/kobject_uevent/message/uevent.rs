@@ -1,177 +1,78 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use core::{
-    fmt::Display,
-    str::FromStr,
-    sync::atomic::{AtomicU64, Ordering},
-};
+//! Wire format serialization for device uevents over Netlink.
 
-use super::syn_uevent::{SyntheticUevent, Uuid};
-use crate::prelude::*;
+use alloc::vec::Vec;
 
-/// `SysObj` action type.
-///
-/// Reference: <https://elixir.bootlin.com/linux/v6.14/source/include/linux/kobject.h#L53>.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, TryFromInt)]
-pub(super) enum SysObjAction {
-    /// Indicates the addition of a new `SysObj` to the system.
-    ///
-    /// Triggered when a device is discovered or registered.
-    Add = 0,
+use aster_device::uevent::Uevent;
 
-    /// Signals the removal of a `SysObj` from the system.
-    ///
-    /// Typically occurs during device disconnection or deregistration.
-    Remove = 1,
+/// Serializes a device uevent into the exact Netlink multicast wire format:
+/// `<action>@<devpath>\0ACTION=<action>\0DEVPATH=<devpath>\0SUBSYSTEM=<subsystem>\0...<var_k>=<var_v>\0...SEQNUM=<seqnum>\0`
+pub(super) fn serialize_uevent(event: &Uevent) -> Vec<u8> {
+    let action_str = event.action().as_str();
+    let devpath = event.devpath();
+    let subsystem = event.subsystem();
 
-    /// Denotes a modification to the `SysObj`'s properties or state.
-    ///
-    /// Used for attribute changes that don't involve structural modifications.
-    Change = 2,
+    // Format the sequence number without allocation.
+    let mut seq_buf = [0u8; 32];
+    let seq_str = format_u64(event.seqnum(), &mut seq_buf);
 
-    /// Represents hierarchical relocation of a `SysObj`.
-    ///
-    /// Occurs when a device moves within the device tree topology.
-    Move = 3,
+    // Precalculate exact capacity.
+    let header_len = action_str.len() + 1 + devpath.len() + 1; // <action>@<devpath>\0
+    let action_len = "ACTION".len() + 1 + action_str.len() + 1;
+    let devpath_len = "DEVPATH".len() + 1 + devpath.len() + 1;
+    let subsystem_len = "SUBSYSTEM".len() + 1 + subsystem.len() + 1;
+    let vars_len = event.vars().total_bytes();
+    let seqnum_len = "SEQNUM".len() + 1 + seq_str.len() + 1;
 
-    /// Marks a device returning to operational status after being offlined.
-    ///
-    /// Common in hot-pluggable device scenarios.
-    Online = 4,
+    let total_capacity =
+        header_len + action_len + devpath_len + subsystem_len + vars_len + seqnum_len;
+    let mut buf = Vec::with_capacity(total_capacity);
 
-    /// Indicates a device entering non-operational status.
-    ///
-    /// Typically precedes safe removal of hot-pluggable hardware.
-    Offline = 5,
+    // 1. Header: <action>@<devpath>\0
+    buf.extend_from_slice(action_str.as_bytes());
+    buf.push(b'@');
+    buf.extend_from_slice(devpath.as_bytes());
+    buf.push(0);
 
-    /// Signifies successful driver-device binding.
-    ///
-    /// Occurs after successful driver probe sequence.
-    Bind = 6,
+    // 2. Base fields
+    buf.extend_from_slice(b"ACTION=");
+    buf.extend_from_slice(action_str.as_bytes());
+    buf.push(0);
 
-    /// Indicates driver-device binding termination.
-    ///
-    /// Precedes driver unload or device removal.
-    Unbind = 7,
-}
+    buf.extend_from_slice(b"DEVPATH=");
+    buf.extend_from_slice(devpath.as_bytes());
+    buf.push(0);
 
-const SYSOBJ_ACTION_STRS: [&str; SysObjAction::Unbind as usize + 1] = [
-    "add", "remove", "change", "move", "online", "offline", "bind", "unbind",
-];
+    buf.extend_from_slice(b"SUBSYSTEM=");
+    buf.extend_from_slice(subsystem.as_bytes());
+    buf.push(0);
 
-impl FromStr for SysObjAction {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        let Some(index) = SYSOBJ_ACTION_STRS
-            .iter()
-            .position(|action_str| s == *action_str)
-        else {
-            return_errno_with_message!(Errno::EINVAL, "the string is not a valid `SysObj` action");
-        };
-
-        Ok(SysObjAction::try_from(index as u8).unwrap())
-    }
-}
-
-impl SysObjAction {
-    fn as_str(&self) -> &'static str {
-        SYSOBJ_ACTION_STRS[*self as usize]
-    }
-}
-
-/// Userspace event.
-pub(super) struct Uevent {
-    /// The `SysObj` action.
-    action: SysObjAction,
-    /// The absolute `SysObj` path under sysfs.
-    devpath: String,
-    /// The subsystem the event originates from
-    subsystem: String,
-    /// Other key-value arguments
-    envs: Vec<(String, String)>,
-    /// Sequence number.
-    seq_num: u64,
-}
-
-impl Uevent {
-    /// Creates a new uevent.
-    fn new(
-        action: SysObjAction,
-        devpath: String,
-        subsystem: String,
-        envs: Vec<(String, String)>,
-    ) -> Self {
-        debug_assert!(devpath.starts_with('/'));
-
-        let seq_num = SEQ_NUM_ALLOCATOR.fetch_add(1, Ordering::Relaxed);
-
-        Self {
-            action,
-            devpath,
-            subsystem,
-            envs,
-            seq_num,
-        }
+    // 3. Extra variables (preserving insertion order)
+    for (k, v) in event.vars().iter() {
+        buf.extend_from_slice(k.as_bytes());
+        buf.push(b'=');
+        buf.extend_from_slice(v.as_bytes());
+        buf.push(0);
     }
 
-    /// Creates a new uevent from synthetic uevent.
-    pub(super) fn new_from_syn(
-        synth_uevent: SyntheticUevent,
-        devpath: String,
-        subsystem: String,
-        mut other_envs: Vec<(String, String)>,
-    ) -> Self {
-        let SyntheticUevent {
-            action,
-            uuid,
-            mut envs,
-        } = synth_uevent;
+    // 4. SEQNUM
+    buf.extend_from_slice(b"SEQNUM=");
+    buf.extend_from_slice(seq_str.as_bytes());
+    buf.push(0);
 
-        let uuid_key = "SYNTH_UUID".to_string();
-        if let Some(Uuid(uuid)) = uuid {
-            envs.push((uuid_key, uuid));
-        } else {
-            envs.push((uuid_key, "0".to_string()));
-        };
-
-        envs.append(&mut other_envs);
-
-        Self::new(action, devpath, subsystem, envs)
-    }
+    buf
 }
 
-impl Display for Uevent {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let mut env_string = {
-            let len = self
-                .envs
-                .iter()
-                .map(|(key, value)| key.len() + value.len() + 2)
-                .sum();
-            String::with_capacity(len)
-        };
-
-        for (key, value) in self.envs.iter() {
-            env_string.push_str(key);
-            env_string.push('=');
-            env_string.push_str(value);
-            env_string.push('\0');
-        }
-
-        write!(
-            f,
-            "{}@{}\0ACTION={}\0DEVPATH={}\0SUBSYSTEM={}\0{}SEQNUM={}\0",
-            self.action.as_str(),
-            self.devpath,
-            self.action.as_str(),
-            self.devpath,
-            self.subsystem,
-            env_string,
-            self.seq_num
-        )
+fn format_u64(mut n: u64, buf: &mut [u8; 32]) -> &str {
+    if n == 0 {
+        return "0";
     }
+    let mut idx = buf.len();
+    while n > 0 {
+        idx -= 1;
+        buf[idx] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    core::str::from_utf8(&buf[idx..]).expect("ASCII digit bytes are valid UTF-8")
 }
-
-static SEQ_NUM_ALLOCATOR: AtomicU64 = AtomicU64::new(1);
