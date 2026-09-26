@@ -7,10 +7,12 @@
 //!
 //! - `cpu_byteorder`: The endianness of the running kernel ("little" or "big")
 //! - `address_bits`: The address size of the running kernel in bits
+//! - `uevent_seqnum`: The global sequence number for device uevents
 //!
 //! These attributes follow the Linux kernel sysfs specification:
 //! - [cpu_byteorder](https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-kernel-cpu_byteorder)
 //! - [address_bits](https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-kernel-address_bits)
+//! - [uevent_seqnum](https://github.com/torvalds/linux/blob/v6.16/kernel/ksysfs.c)
 
 use alloc::sync::Arc;
 
@@ -75,6 +77,10 @@ impl KernelSysNodeRoot {
             SysStr::from("address_bits"),
             SysPerms::DEFAULT_RO_ATTR_PERMS,
         );
+        builder.add(
+            SysStr::from("uevent_seqnum"),
+            SysPerms::DEFAULT_RO_ATTR_PERMS,
+        );
         // TODO: Add more kernel-specific attributes.
         let attrs = builder
             .build()
@@ -108,6 +114,12 @@ inherit_sys_branch_node!(KernelSysNodeRoot, fields, {
                 writeln!(printer, "{}", usize::BITS)?;
                 Ok(printer.bytes_written())
             }
+            "uevent_seqnum" => {
+                let seq = aster_device::uevent::current_seqnum();
+                let mut printer = VmPrinter::new_skip(writer, offset);
+                writeln!(printer, "{}", seq)?;
+                Ok(printer.bytes_written())
+            }
             // TODO: Add support for reading other attributes.
             _ => Err(Error::AttributeError),
         }
@@ -122,3 +134,52 @@ inherit_sys_branch_node!(KernelSysNodeRoot, fields, {
         SysPerms::DEFAULT_RW_PERMS
     }
 });
+
+#[cfg(ktest)]
+mod test {
+    use alloc::vec;
+
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    #[ktest]
+    fn uevent_seqnum_attribute() {
+        let root = KernelSysNodeRoot::new();
+
+        // Read attribute into buffer
+        let mut buf = vec![0u8; 64];
+        let mut writer = VmWriter::from(buf.as_mut_slice()).to_fallible();
+        let bytes = root.read_attr_at("uevent_seqnum", 0, &mut writer).unwrap();
+        let s = core::str::from_utf8(&buf[..bytes]).unwrap();
+
+        // Must be decimal number followed by '\n'
+        assert!(s.ends_with('\n'));
+        let num_str = s.trim_end();
+        let parsed: u64 = num_str.parse().expect("uevent_seqnum must be decimal u64");
+
+        // Consecutive reads must return the exact same value (read does not allocate seq)
+        let mut buf2 = vec![0u8; 64];
+        let mut writer2 = VmWriter::from(buf2.as_mut_slice()).to_fallible();
+        let bytes2 = root.read_attr_at("uevent_seqnum", 0, &mut writer2).unwrap();
+        let s2 = core::str::from_utf8(&buf2[..bytes2]).unwrap();
+        assert_eq!(s, s2);
+        assert_eq!(parsed, aster_device::uevent::current_seqnum());
+
+        // Write must fail (read-only attribute)
+        let input_bytes = b"123";
+        let mut reader = VmReader::from(input_bytes.as_slice()).to_fallible();
+        assert!(root.write_attr("uevent_seqnum", &mut reader).is_err());
+
+        // Partial read with offset
+        if s.len() > 1 {
+            let mut buf_off = vec![0u8; 64];
+            let mut writer_off = VmWriter::from(buf_off.as_mut_slice()).to_fallible();
+            let bytes_off = root
+                .read_attr_at("uevent_seqnum", 1, &mut writer_off)
+                .unwrap();
+            let s_off = core::str::from_utf8(&buf_off[..bytes_off]).unwrap();
+            assert_eq!(s_off, &s[1..]);
+        }
+    }
+}
