@@ -107,12 +107,6 @@ impl HookSlot {
     }
 
     pub(crate) fn create_devnode(&self, request: DevNodeRequest) -> Result<()> {
-        #[cfg(ktest)]
-        {
-            if test_support::FAIL_DEVNODE_CREATE.load(core::sync::atomic::Ordering::Relaxed) {
-                return Err(Error::Hook);
-            }
-        }
         let mut queue = self.pending.lock();
         match self.hooks.get() {
             Some(hooks) => {
@@ -142,37 +136,9 @@ impl HookSlot {
     }
 
     pub(crate) fn broadcast_uevent(&self, event: &crate::uevent::Uevent) -> Result<()> {
-        #[cfg(ktest)]
-        {
-            let observers = test_support::EVENT_OBSERVERS.lock().clone();
-            for obs in observers {
-                obs(event);
-            }
-        }
         if let Some(hooks) = self.hooks.get() {
             hooks.broadcast_uevent(event).map_err(|_| Error::Hook)?;
         }
         Ok(())
-    }
-}
-
-#[cfg(ktest)]
-pub(crate) mod test_support {
-    use core::sync::atomic::AtomicBool;
-
-    use super::*;
-
-    pub(crate) type EventObserver = Arc<dyn Fn(&crate::uevent::Uevent) + Send + Sync>;
-
-    pub(crate) static FAIL_DEVNODE_CREATE: AtomicBool = AtomicBool::new(false);
-    pub(crate) static EVENT_OBSERVERS: spin::Mutex<Vec<EventObserver>> =
-        spin::Mutex::new(Vec::new());
-
-    pub(crate) fn register_test_observer(observer_fn: EventObserver) {
-        EVENT_OBSERVERS.lock().push(observer_fn);
-    }
-
-    pub(crate) fn clear_test_observers() {
-        EVENT_OBSERVERS.lock().clear();
     }
 }

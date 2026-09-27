@@ -25,8 +25,6 @@ mod bare_device;
 mod bus_device;
 mod class_device;
 mod registration;
-#[cfg(ktest)]
-mod test;
 
 use alloc::{
     collections::BTreeMap,
