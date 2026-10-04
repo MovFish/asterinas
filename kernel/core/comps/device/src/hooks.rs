@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Device-node creation and deletion through configurable hooks.
+//! Device-node operations and uevent broadcasting through configurable hooks.
 //!
 //! The device model delegates `/dev` node operations to [`KernelHooks`].
 //! Implement this trait in the code that manages the device filesystem,
 //! then call [`install_hooks`] once it is ready to create and delete nodes.
 //! Node creation requests are queued until [`install_hooks`] installs the hooks and replays them.
 //! Each [`DevNodeRequest`] carries the device number, path relative to `/dev`, and permissions.
+//! Uevents go to [`KernelHooks::broadcast_uevent`] immediately and are not queued before installation.
 
 use alloc::vec::Vec;
 
@@ -25,10 +26,10 @@ pub fn install_hooks(hooks: &'static dyn KernelHooks) {
     HOOKS.install(hooks);
 }
 
-/// Callbacks for creating and deleting `/dev` nodes.
+/// Callbacks for `/dev` nodes and device uevent delivery.
 ///
-/// Installed through [`install_hooks`] once the callbacks are ready to handle requests.
-/// Until then, node creation requests are queued.
+/// Installed through [`install_hooks`] once the callbacks are ready.
+/// Node creation is queued before installation; uevents are not replayed.
 pub trait KernelHooks: Send + Sync + 'static {
     /// Creates a `/dev` node.
     ///
@@ -39,17 +40,32 @@ pub trait KernelHooks: Send + Sync + 'static {
     /// Deletes a `/dev` node created earlier.
     /// The request is the one that created the node.
     fn delete_devnode(&self, request: &DevNodeRequest) -> core::result::Result<(), HookError>;
+
+    /// Broadcasts a device notification to user space.
+    ///
+    /// Runs without a device state or hook queue lock, but serializes with removal
+    /// of the emitting device. It must not recursively emit, bind, unbind, or remove
+    /// that device. Devnode-only implementations may keep the default.
+    fn broadcast_uevent(
+        &self,
+        _event: &crate::uevent::Uevent,
+    ) -> core::result::Result<(), HookError> {
+        Ok(())
+    }
 }
 
-/// A request to create or delete a `/dev` node.
+/// The frozen identity and optional permission override of a `/dev` node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DevNodeRequest {
     /// The device number the node refers to.
     pub devnum: DevNum,
     /// The path of the node relative to `/dev`, e.g. `null` or `input/event0`.
     pub path: SysStr,
-    /// The permission bits of the node.
-    pub mode: u16,
+    /// The permission override; `None` uses [`crate::common::DEFAULT_DEVNODE_MODE`].
+    ///
+    /// Registration normalizes zero overrides to `None`. Nonzero overrides
+    /// contribute their low nine permission bits to `DEVMODE`.
+    pub mode: Option<u16>,
 }
 
 /// An error from a kernel hook.
@@ -62,6 +78,13 @@ pub(crate) fn create_devnode(request: DevNodeRequest) -> Result<()> {
 
 pub(crate) fn delete_devnode(request: &DevNodeRequest) -> Result<()> {
     HOOKS.delete_devnode(request)
+}
+
+pub(crate) fn broadcast_uevent(event: &crate::uevent::Uevent) -> Result<()> {
+    match HOOKS.hooks.get() {
+        Some(hooks) => hooks.broadcast_uevent(event).map_err(|_| Error::Hook),
+        None => Ok(()),
+    }
 }
 
 /// The hooks, once installed, and the requests waiting for them.

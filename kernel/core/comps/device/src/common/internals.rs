@@ -22,6 +22,7 @@ use crate::{
         node::{GlueDirs, SysTreeEdit},
     },
     hooks::DevNodeRequest,
+    uevent::UeventVars,
 };
 
 /// What the registration sequence asks a device for.
@@ -39,6 +40,16 @@ pub trait DeviceInternals {
 
     /// Returns the `/dev` node overrides from the device type and the subsystem.
     fn devnode_override(&self) -> Option<DevNode>;
+
+    /// Returns the bound driver's name, if any.
+    fn driver_name(&self) -> Option<String> {
+        None
+    }
+
+    /// Contributes subsystem and device-type environment entries.
+    fn append_uevent_vars(&self, _vars: &mut UeventVars) -> Result<()> {
+        Ok(())
+    }
 
     /// Returns whether the device gets a `device` symlink to its parent
     /// (class devices only; a device type may opt out).
@@ -65,8 +76,13 @@ pub struct DeviceBase {
     /// Which of the symlinks that `add` may create exist,
     /// so that `teardown` removes only links this device made.
     links: Mutex<Links>,
-    /// The `/dev` node created for this device, kept so it can be deleted.
+    /// The frozen node request, kept for deletion and uevent reporting.
     devnode: Mutex<Option<DevNodeRequest>>,
+    /// Serializes final event state checks and broadcasts with removal.
+    /// Lock order: binding lock (if any), event gate, then device state.
+    /// No state guard reaches a callback.
+    /// Environment callbacks run before taking this gate.
+    uevent_lock: Mutex<()>,
 }
 
 impl DeviceBase {
@@ -107,6 +123,7 @@ impl DeviceBase {
             glue_dirs: GlueDirs::new(),
             links: Mutex::new(Links::default()),
             devnode: Mutex::new(None),
+            uevent_lock: Mutex::new(()),
         }
     }
 
@@ -144,6 +161,10 @@ impl DeviceBase {
 
     pub(super) fn devnode(&self) -> &Mutex<Option<DevNodeRequest>> {
         &self.devnode
+    }
+
+    pub(super) fn uevent_lock(&self) -> &Mutex<()> {
+        &self.uevent_lock
     }
 }
 

@@ -12,7 +12,8 @@ use crate::common::{Subsystem, SysStr, attr::TyErasedAttr};
 
 /// A device with neither bus nor class, such as a host bridge or a firmware root.
 ///
-/// It has no attributes and is listed in no index; it exists to be the parent of other devices.
+/// It is listed in no subsystem index and generates no uevents.
+/// Its core `uevent` attribute reads empty; it exists to be the parent of other devices.
 pub struct BareDevice {
     base: DeviceBase,
 }

@@ -16,6 +16,7 @@
 //! - If you are adding a class or a class device, see [`class`].
 //! - If you are interested in the machinery every device shares, see [`common`].
 //! - If you are tracing how a device becomes a `/dev` node, see [`hooks`].
+//! - If you are consuming device notifications, see [`uevent`] and [`emit_uevent`].
 //!
 //! Every device is registered to or unregistered from the device model
 //! through [`add_device`] and [`remove_device`].
@@ -42,7 +43,7 @@ pub mod uevent;
 
 use component::{ComponentInitError, init_component};
 
-pub use self::common::registration::{add as add_device, remove as remove_device};
+pub use self::common::registration::{add as add_device, emit_uevent, remove as remove_device};
 use self::common::registry;
 
 /// Initializes the device model for kernel-mode tests.

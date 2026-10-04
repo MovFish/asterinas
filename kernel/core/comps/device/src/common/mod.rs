@@ -32,6 +32,7 @@ pub(crate) mod node;
 pub(crate) mod registration;
 pub(crate) mod registry;
 pub(crate) mod subsystem;
+pub(crate) mod uevent;
 
 use alloc::{
     sync::{Arc, Weak},
@@ -92,7 +93,7 @@ pub trait AnyDevice: SysBranchNode + DeviceInternals {
 
 /// A finer kind within one bus or class, such as `disk` versus `partition` in the `block` class.
 ///
-/// A device type contributes attributes and a `devnode` policy to every device that carries it.
+/// A device type contributes attributes, a `devnode` policy, and uevent environment entries.
 pub struct DeviceType<D: 'static> {
     /// The device type name.
     pub name: &'static str,
@@ -102,6 +103,10 @@ pub struct DeviceType<D: 'static> {
     pub devnode: Option<fn(&D) -> Option<DevNode>>,
     /// Whether a class device with this device type gets the `device` symlink to its parent.
     pub has_device_link: bool,
+    /// Contributes environment entries after the bus or class uevent callback.
+    ///
+    /// The concurrency restrictions on [`crate::bus::Bus::uevent`] apply.
+    pub uevent_fn: Option<fn(&D, &mut crate::uevent::UeventVars) -> Result<()>>,
 }
 
 impl<D: 'static> DeviceType<D> {
@@ -112,6 +117,7 @@ impl<D: 'static> DeviceType<D> {
             attrs: &[],
             devnode: None,
             has_device_link: true,
+            uevent_fn: None,
         }
     }
 }
@@ -121,7 +127,11 @@ impl<D: 'static> DeviceType<D> {
 pub struct DevNode {
     /// The node path relative to `/dev`; `None` keeps the device name.
     pub path: Option<SysStr>,
-    /// The permission bits; `None` keeps the default.
+    /// The permission bits; `None` or `Some(0)` keeps the default.
+    ///
+    /// Registration freezes nonzero overrides and normalizes zero to no override.
+    /// Nonzero overrides contribute their low nine permission bits to uevents;
+    /// otherwise `DEVMODE` is omitted.
     pub mode: Option<u16>,
 }
 
@@ -156,6 +166,14 @@ impl<D: AnyDevice> DeclaredParts<D> {
     /// Returns whether the device type keeps the `device` symlink.
     pub(crate) fn has_device_link(&self) -> bool {
         self.dev_type.is_none_or(|t| t.has_device_link)
+    }
+
+    /// Contributes device-type environment entries after the subsystem.
+    pub(crate) fn type_uevent(&self, dev: &D, vars: &mut crate::uevent::UeventVars) -> Result<()> {
+        if let Some(callback) = self.dev_type.and_then(|t| t.uevent_fn) {
+            callback(dev, vars)?;
+        }
+        Ok(())
     }
 }
 

@@ -17,18 +17,29 @@ use crate::{
     common::{
         Error, Result, Subsystem, SubsystemKind, SysStr,
         attr::{Attr, TyErasedAttr},
-        devnum::{DEFAULT_DEVNODE_MODE, DevNum},
+        devnum::DevNum,
         node::{SysTreeEdit, add_link, remove_link},
         registry,
     },
     hooks::{self, DevNodeRequest},
+    uevent::{UeventAction, UeventVars},
 };
+
+/// Emits a uevent for a registered device, propagating callback and delivery errors.
+///
+/// Bare devices have no subsystem identity and generate no notifications.
+/// Lifecycle events use the same environment but are best effort.
+pub fn emit_uevent<D: AnyDevice + ?Sized>(dev: &Arc<D>, action: UeventAction) -> Result<()> {
+    super::uevent::emit(dev.to_arc().as_ref(), action, &UeventVars::new())
+}
 
 /// Registers a device, publishing its sysfs directory and optional `/dev` node.
 ///
 /// The device's sysfs attributes and links are available before its bus probes for a driver
 /// or its class notifies observers.
 /// Device-node creation is queued until the kernel hooks are installed.
+/// An `Add` uevent is emitted before probing or notifying observers.
+/// Uevent callback or delivery failures do not roll registration back.
 ///
 /// On failure, registration is rolled back and the device cannot be added again.
 pub fn add<D: AnyDevice + ?Sized>(dev: &Arc<D>) -> Result<()> {
@@ -39,10 +50,12 @@ pub fn add<D: AnyDevice + ?Sized>(dev: &Arc<D>) -> Result<()> {
 ///
 /// The device must have no child devices when removed.
 /// If its children were created by a driver, unbind that driver from the device first.
+/// A bound device emits `Unbind` before `Remove`; both events are best effort.
 pub fn remove<D: AnyDevice + ?Sized>(dev: &Arc<D>) -> Result<()> {
     let this = dev.to_arc();
     let base = this.base();
     {
+        let _gate = base.uevent_lock().lock();
         let mut state = base.state().lock();
         let State::Added(children) = &*state else {
             return Err(Error::NotAdded);
@@ -52,7 +65,7 @@ pub fn remove<D: AnyDevice + ?Sized>(dev: &Arc<D>) -> Result<()> {
         }
         *state = State::Removed;
     }
-    teardown(&this);
+    teardown(&this, Teardown::Announced);
     Ok(())
 }
 
@@ -153,7 +166,7 @@ fn add_erased(this: Arc<dyn AnyDevice>) -> Result<()> {
         }
         Err(e) => {
             *base.state().lock() = State::Removed;
-            teardown(&this);
+            teardown(&this, Teardown::Silent);
             Err(e)
         }
     }
@@ -167,7 +180,7 @@ fn add_steps(this: &Arc<dyn AnyDevice>) -> Result<()> {
     place(this)?;
 
     // 2. Core attributes.
-    let mut attrs = Vec::new();
+    let mut attrs = alloc::vec![TyErasedAttr::from_dyn(&UEVENT_ATTR)];
     if base.devnum().is_some() {
         attrs.push(TyErasedAttr::from_dyn(&DEV_ATTR));
     }
@@ -206,6 +219,7 @@ fn add_steps(this: &Arc<dyn AnyDevice>) -> Result<()> {
     // No fallible registration steps remain. The path is now stable, and
     // callbacks can register children without a later rollback orphaning them.
     *base.state().lock() = State::Adding(Vec::new());
+    super::uevent::emit_lifecycle(this.as_ref(), UeventAction::Add);
 
     // 6. Let the subsystem act.
     if let Some(ops) = subsystem.ops() {
@@ -215,8 +229,13 @@ fn add_steps(this: &Arc<dyn AnyDevice>) -> Result<()> {
     Ok(())
 }
 
+enum Teardown {
+    Announced,
+    Silent,
+}
+
 /// Undoes registration, tolerating steps that never happened.
-fn teardown(this: &Arc<dyn AnyDevice>) {
+fn teardown(this: &Arc<dyn AnyDevice>, kind: Teardown) {
     let base = this.base();
     let subsystem = this.subsystem();
     // Only links this device created are removed: an index entry under the
@@ -226,6 +245,9 @@ fn teardown(this: &Arc<dyn AnyDevice>) {
     // 6. Let the subsystem act.
     if let Some(ops) = subsystem.ops() {
         ops.on_removed(this);
+    }
+    if matches!(kind, Teardown::Announced) {
+        super::uevent::emit_lifecycle(this.as_ref(), UeventAction::Remove);
     }
 
     // 5. Device number.
@@ -350,7 +372,7 @@ fn uses_glue_dir(subsystem: &Subsystem, parent: &Arc<dyn AnyDevice>) -> bool {
     !sits_inside_parent || subsystem.keeps_glue_dir()
 }
 
-/// Builds a `/dev` node creation request using the device's path and permission overrides.
+/// Freezes the node path and permission policy for deletion and uevent reporting.
 fn devnode_request(dev: &dyn AnyDevice, devnum: DevNum) -> DevNodeRequest {
     let over = dev.devnode_override().unwrap_or_default();
     DevNodeRequest {
@@ -358,9 +380,12 @@ fn devnode_request(dev: &dyn AnyDevice, devnum: DevNum) -> DevNodeRequest {
         path: over
             .path
             .unwrap_or_else(|| SysStr::from(dev.base().name().replace('!', "/"))),
-        mode: over.mode.unwrap_or(DEFAULT_DEVNODE_MODE),
+        mode: over.mode.filter(|mode| *mode != 0),
     }
 }
+
+const UEVENT_ATTR: Attr<dyn AnyDevice> =
+    Attr::rw("uevent", super::uevent::show, super::uevent::store);
 
 const DEV_ATTR: Attr<dyn AnyDevice> = Attr::ro("dev", show_dev);
 

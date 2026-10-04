@@ -60,6 +60,20 @@ pub trait Class: Sized + Send + Sync + 'static {
     /// Returns the attributes shared by all devices on this class.
     fn dev_attrs(&self) -> &'static [Attr<ClassDevice<Self>>];
 
+    /// Contributes environment entries before the device-type uevent callback.
+    ///
+    /// Runs without the device state lock or event gate.
+    /// Environment construction does not acquire the class membership lock,
+    /// but calls from a [`ClassObserver`] inherit its callback restrictions.
+    /// The restrictions on [`crate::bus::Bus::uevent`] apply to this callback too.
+    fn uevent(
+        &self,
+        _dev: &ClassDevice<Self>,
+        _vars: &mut crate::uevent::UeventVars,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Whether a device of this class placed under a class device still gets its own glue directory.
     const KEEPS_GLUE_DIR: bool = false;
 }

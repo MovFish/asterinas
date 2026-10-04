@@ -73,6 +73,18 @@ pub trait Bus: Sized + Send + Sync + 'static {
 
     /// Returns the attributes shared by all devices on this bus.
     fn dev_attrs(&self) -> &'static [Attr<BusDevice<Self>>];
+
+    /// Contributes environment entries to device uevents and readable `uevent` files.
+    ///
+    /// Runs before the device-type callback, without a device state lock or event gate.
+    /// During bind/unbind notifications it may hold the device's binding lock;
+    /// then it must not synchronously emit, bind, unbind, or remove this device,
+    /// unregister its driver, or invoke its driver attributes. In other contexts,
+    /// removal is allowed and cancels the outer emission. Recursively emitting
+    /// or reading this device's `uevent` is not allowed. Child registration is allowed.
+    fn uevent(&self, _dev: &BusDevice<Self>, _vars: &mut crate::uevent::UeventVars) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Registers a bus, creating `/sys/bus/<name>/{devices,drivers}`.
@@ -236,11 +248,16 @@ impl<B: Bus> BusHandle<B> {
         driver.state().lock().start_binding(dev)?;
 
         let result = self.bind_inner(dev, driver);
-        let mut state = driver.state().lock();
+        {
+            let mut state = driver.state().lock();
+            if result.is_ok() {
+                state.finish_binding(dev);
+            } else {
+                state.abort_binding(dev);
+            }
+        }
         if result.is_ok() {
-            state.finish_binding(dev);
-        } else {
-            state.abort_binding(dev);
+            crate::common::uevent::emit_lifecycle(dev.as_ref(), crate::uevent::UeventAction::Bind);
         }
         result
     }
@@ -294,6 +311,7 @@ impl<B: Bus> BusHandle<B> {
         driver.on_release(dev);
         dev.take_driver();
         driver.state().lock().forget_bound(dev);
+        crate::common::uevent::emit_lifecycle(dev.as_ref(), crate::uevent::UeventAction::Unbind);
         Ok(())
     }
 
