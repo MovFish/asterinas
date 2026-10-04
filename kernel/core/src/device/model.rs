@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The kernel side of the device model: the hooks that give the
-//! `aster-device` component access to devtmpfs.
+//! The kernel hooks giving `aster-device` access to devtmpfs and Netlink uevents.
 
 use aster_device::{
     common::{DEFAULT_DEVNODE_MODE, DevKind},
@@ -46,6 +45,14 @@ impl KernelHooks for Hooks {
             );
             HookError
         })
+    }
+
+    fn broadcast_uevent(
+        &self,
+        event: &aster_device::uevent::Uevent,
+    ) -> core::result::Result<(), HookError> {
+        crate::net::socket::netlink::broadcast_uevent(event);
+        Ok(())
     }
 }
 
