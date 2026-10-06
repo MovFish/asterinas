@@ -82,6 +82,22 @@ fn systemctl_list_units(nixos_shell: &mut Session) -> Result<(), Error> {
     Ok(())
 }
 
+#[nixos_test]
+fn udevadm_managed_service_coldplug(nixos_shell: &mut Session) -> Result<(), Error> {
+    nixos_shell.run_cmd_and_expect(
+        "asterinas-udev-mem-test --managed",
+        "All five mem udev tests passed.",
+    )
+}
+
+#[nixos_test]
+fn udevadm_processed_mem_events(nixos_shell: &mut Session) -> Result<(), Error> {
+    nixos_shell.run_cmd_and_expect(
+        "asterinas-udev-mem-processed-test",
+        "All five mem processed-event tests passed.",
+    )
+}
+
 // ============================================================================
 // System Monitoring
 // ============================================================================
