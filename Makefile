@@ -158,6 +158,9 @@ else ifeq ($(AUTO_TEST), regression)
 ENABLE_REGRESSION_TEST := true
 CARGO_OSDK_BUILD_ARGS += --kcmd-args="INTEL_TDX=$(INTEL_TDX)"
 CARGO_OSDK_BUILD_ARGS += --init-args="/test/run_regression_test.sh"
+else ifeq ($(AUTO_TEST), udev)
+ENABLE_REGRESSION_TEST := true
+CARGO_OSDK_BUILD_ARGS += --init-args="/test/udev/run_test.sh"
 else ifeq ($(AUTO_TEST), boot)
 CARGO_OSDK_BUILD_ARGS += --init-args="/test/boot_hello.sh"
 else ifeq ($(AUTO_TEST), vsock)
@@ -354,6 +357,9 @@ ifeq ($(AUTO_TEST), conformance)
 else ifeq ($(AUTO_TEST), regression)
 	@tail --lines 100 qemu.log | grep -q "^All regression tests passed." \
 		|| (echo "Regression test failed" && exit 1)
+else ifeq ($(AUTO_TEST), udev)
+	@tail --lines 100 qemu.log | grep -q "^Real udev coldplug regression passed." \
+		|| (echo "Udev regression test failed" && exit 1)
 else ifeq ($(AUTO_TEST), boot)
 	@tail --lines 100 qemu.log | grep -q "^Successfully booted." \
 		|| (echo "Boot test failed" && exit 1)

@@ -26,13 +26,14 @@ let
 
   pkgs = import ../../../distro/nixpkgs.nix {
     config = { };
-    overlays = [ ];
+    overlays = [ (import ../../../distro/etc_nixos/overlays/systemd) ];
     inherit system crossSystem;
   };
 in
 rec {
   # Packages needed by initramfs
   busybox = pkgs.busybox;
+  udev = pkgs.aster_systemd;
   benchmark = pkgs.callPackage ./benchmark { inherit benchmarkName; };
   conformance = pkgs.callPackage ./conformance {
     inherit smp;
@@ -47,6 +48,7 @@ rec {
     benchmark = if enableBenchmarkTest then benchmark else null;
     conformance = if enableConformanceTest then conformance else null;
     regression = if enableRegressionTest then regression else null;
+    udev = if enableRegressionTest then udev else null;
     dnsServer = dnsServer;
   };
   initramfs-image = pkgs.callPackage ./initramfs-image.nix {

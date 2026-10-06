@@ -127,6 +127,7 @@ x86_64_pkgs:
 		--arg enableConformanceTest true \
 		--out-link /nix/var/nix/gcroots/auto/x86_64-pkgs \
 		-A busybox \
+		-A udev \
 		-A benchmark.fio \
 		-A benchmark.hackbench \
 		-A benchmark.iperf3 \
@@ -154,6 +155,7 @@ riscv64_pkgs:
 		--arg enableConformanceTest true \
 		--out-link /nix/var/nix/gcroots/auto/riscv64-pkgs \
 		-A busybox \
+		-A udev \
 		-A conformance.ltp \
 		-A regression.package
 

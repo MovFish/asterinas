@@ -9,6 +9,7 @@
   benchmark,
   conformance,
   regression,
+  udev,
   dnsServer,
 }:
 let
@@ -38,12 +39,13 @@ let
   ++ lib.optionals (benchmark != null) [ benchmark.package ]
   ++ lib.optionals (conformance != null) [ conformance.package ]
   ++ lib.optionals (regression != null) [ regression.package ]
+  ++ lib.optionals (udev != null) [ udev ]
   ++ lib.optionals is_evtest_included [ pkgs.evtest ];
 in
 stdenvNoCC.mkDerivation {
   name = "initramfs";
   buildCommand = ''
-    mkdir -p $out/{dev,etc,root,usr,opt,tmp,var,proc,sys}
+    mkdir -p $out/{dev,etc,root,run,usr,opt,tmp,var,proc,sys}
     mkdir -p $out/{benchmark,test,ext2,exfat,nvme}
     mkdir -p $out/usr/{bin,sbin,lib,lib64,local}
     ln -sfn usr/bin $out/bin
@@ -55,6 +57,11 @@ stdenvNoCC.mkDerivation {
       cp -r ${pkgs.evtest}/bin/* $out/bin/
     ''}
 
+    ${lib.optionalString (udev != null) ''
+      mkdir -p $out/usr/lib/systemd
+      ln -s ${udev}/bin/udevadm $out/usr/bin/udevadm
+      ln -s ${udev}/lib/systemd/systemd-udevd $out/usr/lib/systemd/systemd-udevd
+    ''}
     cp ${boot_hello} $out/test/boot_hello.sh
     cp ${init} $out/init
 
@@ -89,6 +96,12 @@ stdenvNoCC.mkDerivation {
     # including the packages themselves.
     # The output of `writeClosure` is equivalent to `nix-store -q --requisites`.
     mkdir -p $out/nix/store
+    ${lib.optionalString (udev != null) ''
+      # `all_pkgs` roots are skipped below because their contents are installed
+      # separately. Preserve the udev root output because its programs and
+      # private shared libraries keep their original store paths.
+      cp -r ${udev} $out/nix/store/
+    ''}
     pkg_path=${lib.strings.concatStringsSep ":" all_pkgs}
     while IFS= read -r dep_path; do
       if [[ "$pkg_path" == *"$dep_path"* ]]; then

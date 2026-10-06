@@ -24,6 +24,7 @@ SUBDIRS := \
 	security \
 	time \
 	uevent \
+	udev \
 
 ifeq ($(HOST_PLATFORM), x86_64-linux)
 SUBDIRS += intel_tdx

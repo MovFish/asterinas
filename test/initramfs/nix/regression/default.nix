@@ -24,6 +24,7 @@ let
     "security"
     "time"
     "uevent"
+    "udev"
   ];
 
   tdxAttest = callPackage ./tdx-attest.nix { };
