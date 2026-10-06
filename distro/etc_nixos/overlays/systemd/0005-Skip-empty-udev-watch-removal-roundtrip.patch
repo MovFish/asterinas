@@ -1,0 +1,40 @@
+From 97fc06f5df89ad28260ad0db76967457bfb321dd Mon Sep 17 00:00:00 2001
+From: Asterinas Developers <asterinas@lists.asterinas.dev>
+Date: Mon, 29 Sep 2026 17:10:00 +0800
+Subject: [PATCH] Skip empty udev watch removal roundtrip
+
+A fresh udev manager has no /run/udev/watch directory. Removing a watch in
+that state is already a no-op in manager_remove_watch, but the worker still
+roundtrips through the manager and waits for a signal reply.
+
+Return the same no-op result directly when the watch directory is absent.
+Preserve the existing manager handshake whenever watch state can exist.
+This avoids relying on incomplete Asterinas signalfd metadata only for the
+provably empty state used by the initramfs coldplug scenario.
+
+See `tmp/udev-compatibility-blockers.md`.
+---
+ src/udev/udev-watch.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/udev/udev-watch.c b/src/udev/udev-watch.c
+index 73a1c147e..5bd852a23 100644
+--- a/src/udev/udev-watch.c
++++ b/src/udev/udev-watch.c
+@@ -681,5 +681,14 @@ int udev_watch_end(UdevWorker *worker, sd_device *dev) {
+         assert(worker);
+         assert(dev);
+ 
++        /* manager_remove_watch() already treats an absent watch directory as a no-op. Avoid its
++         * signal roundtrip in that state. See tmp/udev-compatibility-blockers.md. */
++        _cleanup_close_ int watch_dir_fd =
++                RET_NERRNO(open("/run/udev/watch", O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW | O_RDONLY));
++        if (watch_dir_fd == -ENOENT)
++                return 0;
++        if (watch_dir_fd < 0)
++                return watch_dir_fd;
++
+         return notify_and_wait_signal(worker, dev, "INOTIFY_WATCH_REMOVE=1");
+ }
+-- 
+2.34.1

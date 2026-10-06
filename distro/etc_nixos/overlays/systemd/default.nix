@@ -4,12 +4,16 @@ final: prev: {
       ./0001-Skip-mount-state-checking.patch
       ./0002-Disable-loop-too-fast-warning.patch
       ./0003-Switch-MS_SLAVE-to-MS_PRIVATE.patch
+      ./0004-Allow-Asterinas-kernel-uevents-without-credentials.patch
+      ./0005-Skip-empty-udev-watch-removal-roundtrip.patch
+      ./0006-Fallback-unposix-lock-to-flock-on-EINVAL.patch
     ];
 
     postInstall = ''
             ${old.postInstall or ""}
 
             mkdir -p "$out/example/systemd/system"
+
 
             cat > "$out/example/systemd/system/systemd-logind.service" <<'EOF'
       # placeholder for $out
