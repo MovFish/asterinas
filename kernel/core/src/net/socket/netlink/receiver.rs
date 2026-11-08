@@ -10,15 +10,20 @@ pub(crate) struct MessageReceiver<Message> {
 pub(super) struct MessageQueue<Message> {
     messages: VecDeque<Message>,
     total_length: usize,
+    capacity: usize,
     error: Option<Error>,
 }
 
 impl<Message> MessageQueue<Message> {
     /// Creates a pair of a [`MessageQueue`] and a [`MessageReceiver`].
-    pub(super) fn new_pair(pollee: Pollee) -> (Arc<Mutex<Self>>, MessageReceiver<Message>) {
+    pub(super) fn new_pair(
+        pollee: Pollee,
+        capacity: usize,
+    ) -> (Arc<Mutex<Self>>, MessageReceiver<Message>) {
         let queue = Arc::new(Mutex::new(Self {
             messages: VecDeque::new(),
             total_length: 0,
+            capacity,
             error: None,
         }));
         let receiver = MessageReceiver {
@@ -26,6 +31,11 @@ impl<Message> MessageQueue<Message> {
             pollee,
         };
         (queue, receiver)
+    }
+
+    /// Sets the receive capacity without discarding queued messages.
+    pub(super) fn set_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity;
     }
 
     /// Returns whether the message queue is empty.
@@ -86,7 +96,8 @@ impl<Message: QueueableMessage> MessageQueue<Message> {
         // Currently, we don't support sending netlink messages between user spaces, so only the
         // kernel can enqueue new messages. If the kernel fails to enqueue a new message, `ENOBUFS`
         // will be returned when userspace calls `recv`.
-        if NETLINK_DEFAULT_BUF_SIZE - self.total_length < length {
+        // Shrinking the buffer can leave the queued length above the new capacity.
+        if self.capacity.saturating_sub(self.total_length) < length {
             self.error = Some(Error::with_message(
                 Errno::ENOBUFS,
                 "the receive buffer is full",

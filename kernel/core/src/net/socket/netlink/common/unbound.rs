@@ -6,8 +6,8 @@ use crate::{
     events::IoEvents,
     net::socket::{
         netlink::{
-            GroupIdSet, NetlinkSocketAddr, common::bound::BoundNetlink, receiver::MessageQueue,
-            table::SupportedNetlinkProtocol,
+            GroupIdSet, NETLINK_DEFAULT_BUF_SIZE, NetlinkSocketAddr, common::bound::BoundNetlink,
+            receiver::MessageQueue, table::SupportedNetlinkProtocol,
         },
         util::datagram_common,
     },
@@ -17,6 +17,7 @@ use crate::{
 
 pub(super) struct UnboundNetlink<P: SupportedNetlinkProtocol> {
     groups: GroupIdSet,
+    recv_buf: usize,
     phantom: PhantomData<BoundNetlink<P::Message>>,
 }
 
@@ -24,6 +25,7 @@ impl<P: SupportedNetlinkProtocol> UnboundNetlink<P> {
     pub(super) const fn new() -> Self {
         Self {
             groups: GroupIdSet::new_empty(),
+            recv_buf: NETLINK_DEFAULT_BUF_SIZE,
             phantom: PhantomData,
         }
     }
@@ -38,6 +40,10 @@ impl<P: SupportedNetlinkProtocol> UnboundNetlink<P> {
 
     pub(super) fn drop_groups(&mut self, groups: GroupIdSet) {
         self.groups.drop_groups(groups);
+    }
+
+    pub(super) fn set_recv_buf(&mut self, recv_buf: usize) {
+        self.recv_buf = recv_buf;
     }
 }
 
@@ -54,7 +60,7 @@ impl<P: SupportedNetlinkProtocol> datagram_common::Unbound for UnboundNetlink<P>
         _options: Self::BindOptions,
     ) -> Result<Self::Bound> {
         let (message_queue, message_receiver) =
-            MessageQueue::<P::Message>::new_pair(pollee.clone());
+            MessageQueue::<P::Message>::new_pair(pollee.clone(), self.recv_buf);
 
         let bound_handle = {
             let endpoint = {
@@ -74,7 +80,7 @@ impl<P: SupportedNetlinkProtocol> datagram_common::Unbound for UnboundNetlink<P>
         pollee: &Pollee,
     ) -> Result<Self::Bound> {
         let (message_queue, message_receiver) =
-            MessageQueue::<P::Message>::new_pair(pollee.clone());
+            MessageQueue::<P::Message>::new_pair(pollee.clone(), self.recv_buf);
 
         let bound_handle = {
             let endpoint = {

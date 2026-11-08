@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 #include <stdint.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -178,3 +179,122 @@ FN_TEST_FOREACH_PROTO(strict_check_socket_option, sock_fd)
 			 output_len == sizeof(int));
 }
 END_TEST_FOREACH_PROTO(sock_fd)
+
+// Regression for https://github.com/asterinas/asterinas/issues/4187.
+// Invalid link queries generate error replies without changing any links.
+static void queue_link_errors(int fd, unsigned int count)
+{
+	struct {
+		struct nlmsghdr header;
+		struct ifinfomsg link;
+	} request = {
+		.header = {
+			.nlmsg_len = sizeof(request),
+			.nlmsg_type = RTM_GETLINK,
+			.nlmsg_flags = NLM_F_REQUEST,
+		},
+		.link = { .ifi_index = INT32_MAX },
+	};
+	struct sockaddr_nl kernel = { .nl_family = AF_NETLINK };
+
+	for (unsigned int i = 0; i < count; ++i) {
+		CHECK(sendto(fd, &request, sizeof(request), 0,
+			     (struct sockaddr *)&kernel, sizeof(kernel)));
+	}
+}
+
+static unsigned int drain_link_errors(int fd)
+{
+	unsigned int count = 0;
+	struct {
+		struct nlmsghdr header;
+		struct nlmsgerr error;
+		char payload[256];
+	} reply;
+
+	for (;;) {
+		ssize_t len = recv(fd, &reply, sizeof(reply), MSG_DONTWAIT);
+		if (len < 0) {
+			if (errno == ENOBUFS)
+				continue;
+			int error = errno;
+			CHECK_WITH(error, _ret == EAGAIN);
+			return count;
+		}
+		CHECK_WITH(
+			len,
+			len >= (ssize_t)NLMSG_LENGTH(sizeof(struct nlmsgerr)) &&
+				reply.header.nlmsg_type == NLMSG_ERROR &&
+				reply.error.error == -ENODEV);
+		++count;
+	}
+}
+
+FN_TEST(receive_buffer_queue_capacity)
+{
+	const int options[] = { SO_RCVBUF, SO_RCVBUFFORCE };
+	const unsigned int count = 128;
+	struct sockaddr_nl addr = { .nl_family = AF_NETLINK };
+
+	for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); ++i) {
+		// Exercise explicit and implicit binding, and resizing after binding.
+		for (int bound = 0; bound < 3; ++bound) {
+			int fd = TEST_SUCC(socket(AF_NETLINK,
+						  SOCK_RAW | SOCK_NONBLOCK,
+						  NETLINK_ROUTE));
+			if (bound == 2)
+				TEST_SUCC(bind(fd, (struct sockaddr *)&addr,
+					       sizeof(addr)));
+
+			int size = 0;
+			TEST_SUCC(setsockopt(fd, SOL_SOCKET, options[i], &size,
+					     sizeof(size)));
+			if (bound == 1)
+				TEST_SUCC(bind(fd, (struct sockaddr *)&addr,
+					       sizeof(addr)));
+
+			queue_link_errors(fd, count);
+			TEST_RES(drain_link_errors(fd),
+				 _ret > 0 && _ret < count);
+
+			size = 65536;
+			TEST_SUCC(setsockopt(fd, SOL_SOCKET, options[i], &size,
+					     sizeof(size)));
+			queue_link_errors(fd, count);
+			TEST_RES(drain_link_errors(fd), _ret == count);
+
+			// Shrinking a nonempty queue must not discard queued replies.
+			queue_link_errors(fd, count);
+			size = 0;
+			TEST_SUCC(setsockopt(fd, SOL_SOCKET, options[i], &size,
+					     sizeof(size)));
+			queue_link_errors(fd, 1);
+			TEST_ERRNO(recv(fd, &size, sizeof(size), MSG_DONTWAIT),
+				   ENOBUFS);
+			TEST_RES(drain_link_errors(fd), _ret == count);
+
+			// Receiving frees space for subsequent messages.
+			queue_link_errors(fd, 1);
+			TEST_RES(drain_link_errors(fd), _ret == 1);
+			TEST_SUCC(close(fd));
+		}
+	}
+}
+END_TEST()
+
+FN_TEST(enlarged_receive_buffer)
+{
+	int fd = TEST_SUCC(
+		socket(AF_NETLINK, SOCK_RAW | SOCK_NONBLOCK, NETLINK_ROUTE));
+	// Allow for Linux's per-message memory overhead, not just payload bytes.
+	int size = 8 * 1024 * 1024;
+	TEST_SUCC(setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &size,
+			     sizeof(size)));
+
+	// Even header-only error replies exceed 64 KiB in aggregate.
+	const unsigned int count = 4096;
+	queue_link_errors(fd, count);
+	TEST_RES(drain_link_errors(fd), _ret == count);
+	TEST_SUCC(close(fd));
+}
+END_TEST()

@@ -43,6 +43,8 @@ getsockopt(
 );
 
 // Set options at socket level
+// For Netlink sockets, SO_RCVBUF and SO_RCVBUFFORCE limit queued message bytes.
+// They can be set before or after binding; shrinking preserves queued messages.
 setsockopt(
     sockfd, level = SOL_SOCKET,
     optname = <socket_options>,

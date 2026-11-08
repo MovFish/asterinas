@@ -231,12 +231,26 @@ where
 
         // Deal with socket-level options
         let mut options = self.options.write();
+        let old_recv_buf = options.socket.recv_buf();
         match options
             .socket
             .set_option(option, &(&*inner, &self.timeouts))
         {
             Err(err) if err.error() == Errno::ENOPROTOOPT => (),
-            res => return res.map(|_need_iface_poll| ()),
+            Ok(_) => {
+                let recv_buf = options.socket.recv_buf();
+                drop(options);
+                if recv_buf != old_recv_buf {
+                    match &mut *inner {
+                        Inner::Unbound(unbound) => unbound.set_recv_buf(recv_buf as usize),
+                        Inner::Bound(bound) => {
+                            bound.receive_queue.lock().set_capacity(recv_buf as usize);
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            Err(err) => return Err(err),
         }
 
         // Deal with netlink-level options
