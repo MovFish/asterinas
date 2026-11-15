@@ -217,11 +217,7 @@ impl SocketOptionSet {
             }
             socket_recv_buf @ RecvBuf => {
                 let recv_buf = socket_recv_buf.get().unwrap();
-                if *recv_buf <= MIN_RECVBUF {
-                    self.set_recv_buf(MIN_RECVBUF);
-                } else {
-                    self.set_recv_buf(*recv_buf);
-                }
+                self.set_recv_buf((*recv_buf).clamp(MIN_RECVBUF, MAX_RECVBUF));
             }
             socket_keepalive @ KeepAlive => {
                 let keep_alive = socket_keepalive.get().unwrap();
@@ -268,11 +264,9 @@ impl SocketOptionSet {
             socket_recvbuf_force @ RecvBufForce => {
                 check_current_privileged()?;
                 let recv_buf = socket_recvbuf_force.get().unwrap();
-                if *recv_buf <= MIN_RECVBUF {
-                    self.set_recv_buf(MIN_RECVBUF);
-                } else {
-                    self.set_recv_buf(*recv_buf);
-                }
+                // A negative value is treated as zero, as in Linux.
+                let recv_buf = (*recv_buf as i32).max(0) as u32;
+                self.set_recv_buf(recv_buf.clamp(MIN_RECVBUF, MAX_RECVBUF_FORCE));
             }
             _ => return_errno_with_message!(
                 Errno::ENOPROTOOPT,
@@ -378,6 +372,8 @@ fn check_priority(priority: i32) -> Result<()> {
 
 pub(crate) const MIN_SENDBUF: u32 = 2304;
 pub(crate) const MIN_RECVBUF: u32 = 2304;
+pub(crate) const MAX_RECVBUF: u32 = 4 << 20;
+pub(crate) const MAX_RECVBUF_FORCE: u32 = i32::MAX as u32 / 2;
 
 /// A trait used for getting socket level options on actual sockets.
 pub(in crate::net) trait GetSocketLevelOption {
