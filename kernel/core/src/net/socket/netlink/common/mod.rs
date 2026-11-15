@@ -68,10 +68,11 @@ where
     pub(crate) fn new(is_nonblocking: bool, socket_type: SockType) -> Arc<Self> {
         debug_assert!(socket_type == SockType::SOCK_RAW || socket_type == SockType::SOCK_DGRAM);
 
-        let unbound = UnboundNetlink::new();
+        let options = OptionSet::new();
+        let unbound = UnboundNetlink::new(options.socket.recv_buf() as usize);
         Arc::new(Self {
             inner: RwMutex::new(Inner::Unbound(unbound)),
-            options: RwLock::new(OptionSet::new()),
+            options: RwLock::new(options),
             socket_type,
             timeouts: SocketTimeouts::new(),
             pollee: Pollee::new(),
@@ -231,12 +232,22 @@ where
 
         // Deal with socket-level options
         let mut options = self.options.write();
-        match options
+        let old_recv_buf = options.socket.recv_buf();
+        let res = options
             .socket
-            .set_option(option, &(&*inner, &self.timeouts))
-        {
+            .set_option(option, &(&*inner, &self.timeouts));
+        match res {
+            Ok(_) => {
+                let recv_buf = options.socket.recv_buf();
+                // Release the spinlock before taking the queue mutex.
+                drop(options);
+                if recv_buf != old_recv_buf {
+                    inner.set_recv_buf(recv_buf as usize);
+                }
+                return Ok(());
+            }
             Err(err) if err.error() == Errno::ENOPROTOOPT => (),
-            res => return res.map(|_need_iface_poll| ()),
+            Err(err) => return Err(err),
         }
 
         // Deal with netlink-level options
@@ -310,6 +321,13 @@ impl<P: SupportedNetlinkProtocol> Inner<UnboundNetlink<P>, BoundNetlink<P::Messa
         match self {
             Inner::Unbound(unbound_socket) => unbound_socket.drop_groups(groups),
             Inner::Bound(bound_socket) => bound_socket.drop_groups(groups),
+        }
+    }
+
+    fn set_recv_buf(&mut self, recv_buf: usize) {
+        match self {
+            Inner::Unbound(unbound_socket) => unbound_socket.set_recv_buf(recv_buf),
+            Inner::Bound(bound_socket) => bound_socket.set_recv_buf(recv_buf),
         }
     }
 }

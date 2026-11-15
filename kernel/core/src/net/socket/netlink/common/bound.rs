@@ -42,6 +42,10 @@ impl<Message: 'static> BoundNetlink<Message> {
         Ok(())
     }
 
+    pub(super) fn set_recv_buf(&mut self, recv_buf: usize) {
+        self.receive_queue.lock().set_capacity(recv_buf);
+    }
+
     pub(in netlink) fn check_io_events_common(&self) -> IoEvents {
         let mut events = IoEvents::OUT;
 

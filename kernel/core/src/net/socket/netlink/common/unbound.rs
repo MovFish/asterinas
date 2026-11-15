@@ -17,13 +17,15 @@ use crate::{
 
 pub(super) struct UnboundNetlink<P: SupportedNetlinkProtocol> {
     groups: GroupIdSet,
+    recv_buf: usize,
     phantom: PhantomData<BoundNetlink<P::Message>>,
 }
 
 impl<P: SupportedNetlinkProtocol> UnboundNetlink<P> {
-    pub(super) const fn new() -> Self {
+    pub(super) const fn new(recv_buf: usize) -> Self {
         Self {
             groups: GroupIdSet::new_empty(),
+            recv_buf,
             phantom: PhantomData,
         }
     }
@@ -38,6 +40,10 @@ impl<P: SupportedNetlinkProtocol> UnboundNetlink<P> {
 
     pub(super) fn drop_groups(&mut self, groups: GroupIdSet) {
         self.groups.drop_groups(groups);
+    }
+
+    pub(super) fn set_recv_buf(&mut self, recv_buf: usize) {
+        self.recv_buf = recv_buf;
     }
 }
 
@@ -54,7 +60,7 @@ impl<P: SupportedNetlinkProtocol> datagram_common::Unbound for UnboundNetlink<P>
         _options: Self::BindOptions,
     ) -> Result<Self::Bound> {
         let (message_queue, message_receiver) =
-            MessageQueue::<P::Message>::new_pair(pollee.clone());
+            MessageQueue::<P::Message>::new_pair(pollee.clone(), self.recv_buf);
 
         let bound_handle = {
             let endpoint = {
@@ -73,19 +79,7 @@ impl<P: SupportedNetlinkProtocol> datagram_common::Unbound for UnboundNetlink<P>
         _remote_endpoint: &Self::Endpoint,
         pollee: &Pollee,
     ) -> Result<Self::Bound> {
-        let (message_queue, message_receiver) =
-            MessageQueue::<P::Message>::new_pair(pollee.clone());
-
-        let bound_handle = {
-            let endpoint = {
-                let mut endpoint = NetlinkSocketAddr::new_unspecified();
-                endpoint.add_groups(self.groups);
-                endpoint
-            };
-            <P as SupportedNetlinkProtocol>::bind(&endpoint, message_receiver)?
-        };
-
-        Ok(BoundNetlink::new(bound_handle, message_queue))
+        self.bind(&NetlinkSocketAddr::new_unspecified(), pollee, ())
     }
 
     fn check_io_events(&self) -> IoEvents {
