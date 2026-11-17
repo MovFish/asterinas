@@ -27,6 +27,7 @@ set -e
 ./framebuffer
 ./full
 ./hwrng
+./loop
 ./nvme
 ./random
 ./uevent
