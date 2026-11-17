@@ -7,17 +7,11 @@ use crate::{
     prelude::*,
 };
 
-mod block;
+pub(super) mod block;
 pub mod char;
 
 pub(super) fn init_in_first_kthread() {
     block::init_in_first_kthread();
-}
-
-pub(super) fn init_in_first_process() -> Result<()> {
-    block::init_in_first_process()?;
-
-    Ok(())
 }
 
 pub(crate) fn lookup(device_type: DeviceType, device_id: DeviceId) -> Option<Arc<dyn Device>> {
