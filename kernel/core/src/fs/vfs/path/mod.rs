@@ -1082,6 +1082,11 @@ impl Path {
         inode.resize(&self.dentry, size)
     }
 
+    /// Clears set-ID bits and file capabilities when file content is modified.
+    pub(crate) fn clear_file_priv(&self) -> Result<()> {
+        xattr::clear_file_priv(&self.dentry)
+    }
+
     /// Sets an xattr of the file.
     pub(crate) fn set_xattr(
         &self,

@@ -144,6 +144,15 @@ Supported functionality in SCML:
 {{#include ioctl.scml}}
 ```
 
+Loop devices support regular-file backing, byte offsets, size limits,
+and read-only backing descriptors.
+Configuration requires `CAP_SYS_ADMIN`.
+Backing files on loop-mounted or stacking filesystems are rejected
+to prevent recursive block I/O.
+Encryption, `LO_FLAGS_AUTOCLEAR`, `LO_FLAGS_PARTSCAN`,
+and backing-file direct I/O are not supported.
+The loop pool contains eight devices initially and supports up to 256 devices.
+
 For more information,
 see [the man page](https://man7.org/linux/man-pages/man2/ioctl.2.html).
 

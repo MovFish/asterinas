@@ -15,6 +15,14 @@ pub(crate) mod tdxguest;
 
 static MISC_MAJOR: Once<MajorIdOwner> = Once::new();
 
+/// Returns the major device number shared by miscellaneous character devices.
+pub(super) fn major() -> MajorId {
+    MISC_MAJOR
+        .get()
+        .expect("the misc major must be initialized before registering misc devices")
+        .get()
+}
+
 pub(super) fn init_in_first_kthread() {
     MISC_MAJOR.call_once(|| acquire_major(MajorId::new(10)).unwrap());
 

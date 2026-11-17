@@ -99,26 +99,34 @@ pub(super) fn init_in_first_kthread() {
     }
 }
 
-/// A block device exposed through `/sys/class/block` and `/dev`.
+/// The driver hooks of a block device, analogous to Linux
+/// `struct block_device_operations`.
 ///
-/// This is the kernel-side view of a block device. The `aster_block` backend
-/// performs I/O, while this trait supplies the file operations used when the
-/// device node is opened. Most devices use the generic [`RawBlockFile`]
-/// adapter; a device with extra ioctls, such as a loop device, implements this
-/// trait directly.
-pub(in crate::device) trait BlockDevice: Send + Sync {
+/// The generic [`OpenBlockFile`] implements the file operations shared by all
+/// block devices, analogous to Linux `def_blk_fops`. This trait only supplies
+/// the backend and the driver-specific lifecycle, control, and ioctl hooks.
+pub(in crate::device) trait RegisteredBlockDevice: Send + Sync {
     /// Returns the backend registered with `aster_block`.
     fn backend(&self) -> &dyn RawBlockDevice;
 
     /// Returns an owned handle to the backend.
     fn into_backend(self: Arc<Self>) -> Arc<dyn RawBlockDevice>;
 
-    /// Opens the device for user-space I/O.
+    /// Notifies the driver that the device node is being opened.
+    fn open(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Notifies the driver that an opened device node is being closed.
+    fn release(&self) {}
+
+    /// Handles a driver-specific ioctl that the generic block file does not
+    /// recognize.
     ///
-    /// `device` is the registered device-model node. Devices that emit change
-    /// events from an open file, such as loop devices, keep a weak reference
-    /// to it.
-    fn open(self: Arc<Self>, device: &Arc<dyn AnyDevice>) -> Result<Box<dyn PerOpenFileOps>>;
+    /// `device` is the device-model node of the open file, if it still exists.
+    fn ioctl(&self, _device: Option<&dyn AnyDevice>, _raw_ioctl: RawIoctl) -> Result<i32> {
+        return_errno!(Errno::ENOTTY)
+    }
 
     /// Returns whether the device currently rejects writes.
     fn is_read_only(&self) -> bool {
@@ -136,7 +144,7 @@ pub(in crate::device) struct BlockClass;
 
 impl Class for BlockClass {
     const NAME: &'static str = "block";
-    type Device = Arc<dyn BlockDevice>;
+    type Device = Arc<dyn RegisteredBlockDevice>;
 
     fn dev_attrs(&self) -> &'static [Attr<BlockDeviceNode>] {
         BLOCK_ATTRS
@@ -167,17 +175,13 @@ impl RawBlockFile {
     }
 }
 
-impl BlockDevice for RawBlockFile {
+impl RegisteredBlockDevice for RawBlockFile {
     fn backend(&self) -> &dyn RawBlockDevice {
         self.0.as_ref()
     }
 
     fn into_backend(self: Arc<Self>) -> Arc<dyn RawBlockDevice> {
         self.0.clone()
-    }
-
-    fn open(self: Arc<Self>, _device: &Arc<dyn AnyDevice>) -> Result<Box<dyn PerOpenFileOps>> {
-        Ok(Box::new(OpenBlockFile::new(self.0.clone())))
     }
 }
 
@@ -198,8 +202,12 @@ impl Device for BlockDeviceNode {
     }
 
     fn open(&self) -> Result<Box<dyn PerOpenFileOps>> {
-        let device = self.to_arc();
-        self.payload().clone().open(&device)
+        let device = self.payload().clone();
+        device.open()?;
+        Ok(Box::new(OpenBlockFile::new(
+            device,
+            Arc::downgrade(&self.to_arc()),
+        )))
     }
 }
 
@@ -224,6 +232,27 @@ fn show_removable(
     Ok(())
 }
 
+/// Registers a block device in both the block backend and the device model.
+///
+/// This is the single entry point for block devices that are created at
+/// runtime, such as loop devices.
+pub(in crate::device) fn register(
+    device: Arc<dyn RegisteredBlockDevice>,
+) -> Result<Arc<BlockDeviceNode>> {
+    let _guard = REGISTRATION_LOCK.lock();
+    let id = device.backend().id();
+    aster_block::register(device.clone().into_backend())
+        .map_err(|_| Error::with_message(Errno::EEXIST, "the block device ID is registered"))?;
+
+    match add_to_class(device) {
+        Ok(device) => Ok(device),
+        Err(error) => {
+            let _ = aster_block::unregister(id);
+            Err(error)
+        }
+    }
+}
+
 /// Adds an already-registered backend to the block class.
 fn adopt(device: Arc<dyn RawBlockDevice>) -> Result<Arc<BlockDeviceNode>> {
     let _guard = REGISTRATION_LOCK.lock();
@@ -234,7 +263,7 @@ fn adopt(device: Arc<dyn RawBlockDevice>) -> Result<Arc<BlockDeviceNode>> {
     add_to_class(Arc::new(RawBlockFile::new(device)))
 }
 
-fn add_to_class(device: Arc<dyn BlockDevice>) -> Result<Arc<BlockDeviceNode>> {
+fn add_to_class(device: Arc<dyn RegisteredBlockDevice>) -> Result<Arc<BlockDeviceNode>> {
     let backend = device.backend();
     let id = backend.id();
     let name = backend.name().to_owned();
@@ -290,6 +319,28 @@ fn add_to_class(device: Arc<dyn BlockDevice>) -> Result<Arc<BlockDeviceNode>> {
     Ok(node)
 }
 
+/// Unregisters a block device from both the device model and the block backend.
+///
+/// Existing open files keep the backend alive.
+pub(in crate::device) fn unregister(id: DeviceId) -> Result<()> {
+    let _guard = REGISTRATION_LOCK.lock();
+    let device = DEVICE_REGISTRY
+        .lock()
+        .remove(&id.to_raw())
+        .ok_or_else(|| Error::with_message(Errno::ENOENT, "the block device is not registered"))?;
+
+    if let Err(error) = aster_device::remove_device(&device) {
+        DEVICE_REGISTRY.lock().insert(id.to_raw(), device);
+        return Err(error.into());
+    }
+
+    if aster_block::unregister(id).is_err() {
+        warn!("the block device backend was not registered: {:?}", id);
+    }
+
+    Ok(())
+}
+
 mod ioctl_defs {
     use crate::{
         ioc,
@@ -317,17 +368,29 @@ mod ioctl_defs {
     pub(super) type BlkGetSectorSize = ioc!(BLKSSZGET, 0x12, 104, NoData);
 }
 
-/// Represents an opened block device file ready for I/O operations.
-pub(in crate::device) struct OpenBlockFile(Arc<dyn RawBlockDevice>);
+/// An opened block device file, analogous to Linux `def_blk_fops`.
+///
+/// All block devices share these operations. Driver-specific behavior is
+/// delegated to the [`RegisteredBlockDevice`] hooks.
+struct OpenBlockFile {
+    device: Arc<dyn RegisteredBlockDevice>,
+    node: Weak<dyn AnyDevice>,
+}
 
 impl OpenBlockFile {
     /// Creates an opened file for a block device.
-    pub(in crate::device) fn new(device: Arc<dyn RawBlockDevice>) -> Self {
-        Self(device)
+    fn new(device: Arc<dyn RegisteredBlockDevice>, node: Weak<dyn AnyDevice>) -> Self {
+        Self { device, node }
     }
 
-    fn raw(&self) -> &dyn RawBlockDevice {
-        self.0.as_ref()
+    fn backend(&self) -> &dyn RawBlockDevice {
+        self.device.backend()
+    }
+}
+
+impl Drop for OpenBlockFile {
+    fn drop(&mut self) {
+        self.device.release();
     }
 }
 
@@ -343,7 +406,7 @@ impl FileOps for OpenBlockFile {
             return Ok(0);
         }
 
-        let device_size = self.raw().metadata().nr_sectors * SECTOR_SIZE;
+        let device_size = self.backend().metadata().nr_sectors * SECTOR_SIZE;
         if offset >= device_size {
             return Ok(0);
         }
@@ -354,7 +417,7 @@ impl FileOps for OpenBlockFile {
             // so the writer must be precisely limited here.
             let mut limited_writer = writer.clone_exclusive();
             limited_writer.limit(read_len);
-            self.raw().read(offset, &mut limited_writer)?;
+            self.backend().read(offset, &mut limited_writer)?;
         }
         writer.skip(read_len);
         Ok(read_len)
@@ -366,12 +429,18 @@ impl FileOps for OpenBlockFile {
         reader: &mut VmReader,
         _status_flags: StatusFlags,
     ) -> Result<usize> {
+        // Linux `bdev_read_only` rejects writes before looking at the length,
+        // so a zero-byte write to a read-only device also fails.
+        if self.device.is_read_only() {
+            return_errno!(Errno::EPERM);
+        }
+
         let total = reader.remain();
         if total == 0 {
             return Ok(0);
         }
 
-        let device_size = self.raw().metadata().nr_sectors * SECTOR_SIZE;
+        let device_size = self.backend().metadata().nr_sectors * SECTOR_SIZE;
         if offset >= device_size {
             return_errno_with_message!(
                 Errno::ENOSPC,
@@ -385,7 +454,7 @@ impl FileOps for OpenBlockFile {
             // so the reader must be precisely limited here.
             let mut limited_reader = reader.clone();
             limited_reader.limit(write_len);
-            self.raw().write(offset, &mut limited_reader)?;
+            self.backend().write(offset, &mut limited_reader)?;
         }
         reader.skip(write_len);
         Ok(write_len)
@@ -409,7 +478,7 @@ impl PerOpenFileOps for OpenBlockFile {
     }
 
     fn seek_end(&self) -> Result<Option<usize>> {
-        Ok(Some(self.raw().metadata().nr_sectors * SECTOR_SIZE))
+        Ok(Some(self.backend().metadata().nr_sectors * SECTOR_SIZE))
     }
 
     fn ioctl(&self, _path: &Path, raw_ioctl: RawIoctl) -> Result<i32> {
@@ -426,14 +495,11 @@ impl PerOpenFileOps for OpenBlockFile {
                 Ok(0)
             }
             cmd @ BlkGetSize64 => {
-                let size = (self.raw().metadata().nr_sectors * SECTOR_SIZE) as u64;
+                let size = (self.backend().metadata().nr_sectors * SECTOR_SIZE) as u64;
                 cmd.write(&size)?;
                 Ok(0)
             }
-            _ => return_errno_with_message!(
-                Errno::ENOTTY,
-                "the ioctl command is not supported by block devices"
-            ),
+            _ => self.device.ioctl(self.node.upgrade().as_deref(), raw_ioctl),
         })
     }
 
@@ -442,7 +508,7 @@ impl PerOpenFileOps for OpenBlockFile {
     }
 
     fn sync(&self, _mode: SyncMode) -> Result<()> {
-        match self.raw().sync()? {
+        match self.backend().sync()? {
             // Linux treats an unsupported block-device flush as success.
             // Reference: <https://github.com/torvalds/linux/blob/v6.16/block/fops.c#L609-L611>
             BioStatus::Complete | BioStatus::NotSupported => Ok(()),
