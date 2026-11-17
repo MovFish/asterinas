@@ -1906,3 +1906,7 @@ statx03
 
 # Tests below may cause kernel memory leak
 # perf_event_open03
+
+# Selected non-syscall LTP tests executed via the syscalls runner
+read_all_sys
+uevent01

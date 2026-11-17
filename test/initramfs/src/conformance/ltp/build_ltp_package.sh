@@ -25,13 +25,20 @@ SYSCALLS="$LTP_PREBUILT_DIR/runtest/syscalls"
 
 REQUESTED_TESTS=$(mktemp)
 SELECTED_TESTS=$(mktemp)
+TEST_DEFINITIONS=$(mktemp)
 
-trap 'rm -f "$REQUESTED_TESTS" "$SELECTED_TESTS"' EXIT
+trap 'rm -f "$REQUESTED_TESTS" "$SELECTED_TESTS" "$TEST_DEFINITIONS"' EXIT
 
 if [ ! -r "$SYSCALLS" ]; then
     echo "Missing LTP syscall definitions: $SYSCALLS" >&2
     exit 1
 fi
+
+cat "$SYSCALLS" > "$TEST_DEFINITIONS"
+awk '$1 == "read_all_sys" { print; found = 1 } END { exit !found }' \
+    "$LTP_PREBUILT_DIR/runtest/fs" >> "$TEST_DEFINITIONS"
+awk '$1 == "uevent01" { print; found = 1 } END { exit !found }' \
+    "$LTP_PREBUILT_DIR/runtest/uevent" >> "$TEST_DEFINITIONS"
 
 rm -rf "$TARGET_DIR"
 mkdir -p "$TARGET_DIR/testcases/bin" "$TARGET_DIR/runtest"
@@ -61,7 +68,7 @@ if [ -n "$CONFORMANCE_TEST_SELECTOR" ]; then
         [ -z "$syscall" ] && continue
 
         selected_count=$((selected_count + 1))
-        binary=$(awk -v selected="$syscall" '$1 == selected { print $2; exit }' "$SYSCALLS")
+        binary=$(awk -v selected="$syscall" '$1 == selected { print $2; exit }' "$TEST_DEFINITIONS")
         if [ -z "$binary" ]; then
             echo "Error: unknown LTP test: $syscall" >&2
             invalid_selector=1
@@ -106,7 +113,7 @@ while read -r syscall binary params; do
             echo "Warning: $binary not found (skipping)"
         fi
     fi
-done < "$SYSCALLS"
+done < "$TEST_DEFINITIONS"
 
 if [ -d "$LTP_PREBUILT_DIR/bin" ]; then
     cp -r "$LTP_PREBUILT_DIR/bin" "$TARGET_DIR"
