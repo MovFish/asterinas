@@ -273,8 +273,8 @@ impl BlockDevice for PartitionNode {
         self.id
     }
 
-    fn is_partition(&self) -> bool {
-        true
+    fn parent_device_id(&self) -> Option<DeviceId> {
+        Some(self.device.id())
     }
 }
 

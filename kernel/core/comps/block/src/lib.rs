@@ -83,9 +83,11 @@ pub trait BlockDevice: Send + Sync + Any + Debug {
     /// Returns the device ID of the block device.
     fn id(&self) -> DeviceId;
 
-    /// Returns whether the block device is a partition.
-    fn is_partition(&self) -> bool {
-        false
+    /// Returns the ID of the whole-disk device that contains this partition.
+    ///
+    /// Whole-disk devices return `None`.
+    fn parent_device_id(&self) -> Option<DeviceId> {
+        None
     }
 
     /// Returns the partition manager of the block device.
@@ -172,7 +174,7 @@ pub fn lookup_by_name(name: &str) -> Option<Arc<dyn BlockDevice>> {
 pub fn scan_partitions() {
     let devices = collect_all();
     for device in devices {
-        if device.is_partition() {
+        if device.parent_device_id().is_some() {
             continue;
         }
 
