@@ -39,32 +39,35 @@ fn clear_set_id_bits(dentry: &Dentry) -> Result<()> {
         return Ok(());
     }
 
-    let current_thread = current_thread!();
-    let posix_thread = current_thread.as_posix_thread().unwrap();
-
-    // Callers with `CAP_FSETID` may preserve both set-ID bits across content changes.
-    if lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
-        UserNamespace::get_init_singleton().as_ref(),
-        posix_thread,
-        CapSet::FSETID,
-    ))
-    .is_ok()
-    {
-        return Ok(());
-    }
-
     let original_mode = mode;
-    mode.remove(InodeMode::S_ISUID);
-
-    if mode.contains(InodeMode::S_ISGID) {
-        let inode_gid = inode.group()?;
-        let credentials = posix_thread.credentials();
-        let retain_sgid =
-            !mode.contains(InodeMode::S_IXGRP) && credentials.has_group_for_fs_access(inode_gid);
-
-        if !retain_sgid {
-            mode.remove(InodeMode::S_ISGID);
+    let current_thread = current_thread!();
+    if let Some(posix_thread) = current_thread.as_posix_thread() {
+        // Callers with `CAP_FSETID` may preserve both set-ID bits across content changes.
+        if lsm_hooks::on_capable(lsm_hooks::CapableContext::new(
+            UserNamespace::get_init_singleton().as_ref(),
+            posix_thread,
+            CapSet::FSETID,
+        ))
+        .is_ok()
+        {
+            return Ok(());
         }
+
+        mode.remove(InodeMode::S_ISUID);
+
+        if mode.contains(InodeMode::S_ISGID) {
+            let inode_gid = inode.group()?;
+            let credentials = posix_thread.credentials();
+            let retain_sgid = !mode.contains(InodeMode::S_IXGRP)
+                && credentials.has_group_for_fs_access(inode_gid);
+
+            if !retain_sgid {
+                mode.remove(InodeMode::S_ISGID);
+            }
+        }
+    } else {
+        // Kernel workers carry no user credentials, so clear set-ID bits conservatively.
+        mode.remove(InodeMode::S_ISUID | InodeMode::S_ISGID);
     }
 
     if mode == original_mode {
