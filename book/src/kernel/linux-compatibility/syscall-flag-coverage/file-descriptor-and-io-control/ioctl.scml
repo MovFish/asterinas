@@ -47,6 +47,13 @@ ioctl(
 
 // Control block devices
 ioctl(fd, op = BLKGETSIZE64 | BLKSSZGET, ..);
+ioctl(
+    fd,
+    op = LOOP_SET_FD | LOOP_CLR_FD | LOOP_SET_STATUS | LOOP_GET_STATUS |
+         LOOP_SET_STATUS64 | LOOP_GET_STATUS64 | LOOP_SET_CAPACITY |
+         LOOP_CONFIGURE | LOOP_CTL_ADD | LOOP_CTL_REMOVE | LOOP_CTL_GET_FREE,
+    ..
+);
 
 // Control Trust Domain Extensions (TDX) guest devices
 ioctl(fd, op = TDX_CMD_GET_REPORT0, ..);

@@ -144,6 +144,27 @@ Supported functionality in SCML:
 {{#include ioctl.scml}}
 ```
 
+Loop devices support regular-file backing, byte offsets, size limits,
+and read-only backing descriptors (`LO_FLAGS_READ_ONLY`).
+`LOOP_SET_FD` binds a backing file,
+and `LOOP_CONFIGURE` binds it atomically with a full status (`block_size` must be `0` or `512`).
+Modifying loop commands currently require `CAP_SYS_ADMIN`.
+`LOOP_CLR_FD` returns `EBUSY` if another descriptor holds the device open;
+mounted filesystems do not yet hold an open lease on the underlying block device.
+`/dev/loop-control` is created with mode `0600`;
+its commands are guarded by node permissions rather than an additional capability check.
+
+Unsupported loop functionality:
+* Encryption, `LO_FLAGS_AUTOCLEAR`, `LO_FLAGS_PARTSCAN`, and `LO_FLAGS_DIRECT_IO`
+* `LOOP_SET_DIRECT_IO`, `LOOP_SET_BLOCK_SIZE` (block sizes other than 512),
+  and `LOOP_CHANGE_FD`
+* `BLKRRPART` and runtime partition rescans
+* The `/sys/class/block/loopN/loop/` sysfs directory
+* Backing files on loop-mounted or `overlay` filesystems,
+  which are rejected to prevent recursive block I/O
+
+The loop pool contains eight devices initially and supports up to 256 devices.
+
 For more information,
 see [the man page](https://man7.org/linux/man-pages/man2/ioctl.2.html).
 
