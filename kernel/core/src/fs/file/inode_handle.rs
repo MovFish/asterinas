@@ -271,6 +271,47 @@ impl InodeHandle {
 
         Ok((open_file.as_ref() as &dyn Any).downcast_ref::<T>())
     }
+
+    /// Reads bytes at `offset` using `status_flags` instead of the handle's flags.
+    pub(crate) fn read_at_with_flags(
+        &self,
+        offset: usize,
+        writer: &mut VmWriter,
+        status_flags: StatusFlags,
+    ) -> Result<usize> {
+        let file_ops = self.file_ops_for_positional_io()?;
+        if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_readable() {
+            return_errno_with_message!(Errno::EBADF, "the file is not opened readable");
+        }
+
+        file_ops.read_at(offset, writer, status_flags)
+    }
+
+    /// Writes bytes at `offset` using `status_flags` instead of the handle's flags.
+    pub(crate) fn write_at_with_flags(
+        &self,
+        mut offset: usize,
+        reader: &mut VmReader,
+        status_flags: StatusFlags,
+    ) -> Result<usize> {
+        let file_ops = self.file_ops_for_positional_io()?;
+        if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_writable() {
+            return_errno_with_message!(Errno::EBADF, "the file is not opened writable");
+        }
+        if reader.remain() > 0 {
+            clear_file_priv(self.path().dentry())?;
+        }
+
+        // FIXME: How can we deal with the `O_APPEND` flag if `open_file` is set?
+        if status_flags.contains(StatusFlags::O_APPEND) && self.open_file.is_none() {
+            // If the file has the `O_APPEND` flag, the offset is ignored.
+            // FIXME: `O_APPEND` should ensure that new content is appended even if another process
+            // is writing to the file concurrently.
+            offset = self.path().size();
+        }
+
+        file_ops.write_at(offset, reader, status_flags)
+    }
 }
 
 impl Pollable for InodeHandle {
@@ -340,36 +381,11 @@ impl FileLike for InodeHandle {
     }
 
     fn read_at(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
-        let file_ops = self.file_ops_for_positional_io()?;
-        if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_readable() {
-            return_errno_with_message!(Errno::EBADF, "the file is not opened readable");
-        }
-
-        let status_flags = self.status_flags();
-
-        file_ops.read_at(offset, writer, status_flags)
+        self.read_at_with_flags(offset, writer, self.status_flags())
     }
 
-    fn write_at(&self, mut offset: usize, reader: &mut VmReader) -> Result<usize> {
-        let file_ops = self.file_ops_for_positional_io()?;
-        if self.status_flags().contains(StatusFlags::O_PATH) || !self.access_mode().is_writable() {
-            return_errno_with_message!(Errno::EBADF, "the file is not opened writable");
-        }
-        if reader.remain() > 0 {
-            clear_file_priv(self.path().dentry())?;
-        }
-
-        let status_flags = self.status_flags();
-
-        // FIXME: How can we deal with the `O_APPEND` flag if `open_file` is set?
-        if status_flags.contains(StatusFlags::O_APPEND) && self.open_file.is_none() {
-            // If the file has the `O_APPEND` flag, the offset is ignored.
-            // FIXME: `O_APPEND` should ensure that new content is appended even if another process
-            // is writing to the file concurrently.
-            offset = self.path().size();
-        }
-
-        file_ops.write_at(offset, reader, status_flags)
+    fn write_at(&self, offset: usize, reader: &mut VmReader) -> Result<usize> {
+        self.write_at_with_flags(offset, reader, self.status_flags())
     }
 
     fn ioctl(&self, raw_ioctl: RawIoctl) -> Result<i32> {
