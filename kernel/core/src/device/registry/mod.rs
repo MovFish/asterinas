@@ -10,6 +10,8 @@ use crate::{
 mod block;
 pub mod char;
 
+pub(super) use block::{OpenBlockFile, register_opener};
+
 pub(super) fn init_in_first_kthread() {
     block::init_in_first_kthread();
 }

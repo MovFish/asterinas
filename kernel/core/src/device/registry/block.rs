@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use aster_block::{BLOCK_SIZE, BlockDevice, BlockDeviceKind, SECTOR_SIZE, bio::BioStatus};
-use device_id::DeviceId;
+use aster_block::{
+    BLOCK_SIZE, BlockDevice, BlockDeviceKind, MajorIdOwner, SECTOR_SIZE, bio::BioStatus,
+};
+use device_id::{DeviceId, MajorId};
 use ostd::mm::VmIo;
 
 use crate::{
@@ -67,6 +69,20 @@ mod ioctl_defs {
     pub(super) type BlkGetSectorSize = ioc!(BLKSSZGET, 0x12, 104, NoData);
 }
 
+/// A driver-provided constructor for opening a block device file.
+pub(in crate::device) type BlockOpenFn = fn(Arc<BlockDevice>) -> Result<Box<dyn PerOpenFileOps>>;
+
+static OPENERS: RwLock<BTreeMap<MajorId, BlockOpenFn>> = RwLock::new(BTreeMap::new());
+
+/// Registers a custom open handler for all block devices sharing `major`.
+///
+/// Requiring `&MajorIdOwner` ensures only the driver that owns the major ID
+/// can override how its block devices are opened.
+pub(in crate::device) fn register_opener(major: &MajorIdOwner, opener: BlockOpenFn) {
+    let prev = OPENERS.write().insert(major.get(), opener);
+    debug_assert!(prev.is_none(), "block opener already registered for major");
+}
+
 impl Device for BlockDevice {
     fn type_(&self) -> DeviceType {
         DeviceType::Block
@@ -81,12 +97,27 @@ impl Device for BlockDevice {
     }
 
     fn open(&self) -> Result<Box<dyn PerOpenFileOps>> {
-        Ok(Box::new(OpenBlockFile(self.this())))
+        let device = self.this();
+        let opener = OPENERS.read().get(&self.id().major()).copied();
+        if let Some(open_fn) = opener {
+            return open_fn(device);
+        }
+        Ok(Box::new(OpenBlockFile::new(device)))
     }
 }
 
 /// Represents an opened block device file ready for I/O operations.
-struct OpenBlockFile(Arc<BlockDevice>);
+pub(in crate::device) struct OpenBlockFile(Arc<BlockDevice>);
+
+impl OpenBlockFile {
+    pub(in crate::device) fn new(device: Arc<BlockDevice>) -> Self {
+        Self(device)
+    }
+
+    pub(in crate::device) fn device(&self) -> &Arc<BlockDevice> {
+        &self.0
+    }
+}
 
 impl FileOps for OpenBlockFile {
     fn read_at(

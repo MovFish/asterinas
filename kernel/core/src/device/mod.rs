@@ -2,6 +2,7 @@
 
 mod evdev;
 mod fb;
+mod loopdev;
 mod mem;
 pub(crate) mod misc;
 mod model;
@@ -57,6 +58,7 @@ pub(crate) fn init_in_first_kthread() {
     registry::init_in_first_kthread();
     mem::init_in_first_kthread();
     misc::init_in_first_kthread();
+    loopdev::init_in_first_kthread();
     evdev::init_in_first_kthread();
     // TODO: Transfer ownership of the boot framebuffer to DRM and skip registering the
     // legacy framebuffer device once DRM has initialized successfully.
